@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 实施计划
 
-> 版本 v1.0 | 更新 2026-06-13 | 全功能交付
+> 版本 v1.1 | 更新 2026-06-30 | 全功能交付 + 生成任务可重连
 
 ## 当前状态
 - **架构变更**: Project/Module → KnowledgeBase（知识库为核心，卡片式管理）
@@ -17,6 +17,7 @@
 | 统计分析 | 用例数/可用率/幻觉分布/批次统计，看板 | ✓ |
 | 检索 | 中文n-gram关键词 + ChromaDB向量混合检索 | ✓ |
 | 导出 | Excel下载(5列对齐用户模板)，按批次/按结果导出 | ✓ |
+| 生成任务 | 后台任务(asyncio)+独立DB会话，SSE事件缓存重放，刷新/切页后断点续看，全局页头「生成中」入口 | ✓ |
 
 ## Context
 
@@ -34,7 +35,7 @@
 | 构建 | Vite |
 | 后端 | Python 3.10+ + FastAPI (async) |
 | 数据库 | SQLite (dev) → PostgreSQL (prod) |
-| 向量库 | ChromaDB |
+| 向量库 | ChromaDB 1.5.x（持久化 PersistentClient） |
 | LLM | LLM API (OpenAI 兼容 /v1/chat/completions) |
 | Embedding | Embedding API (OpenAI 兼容) (可切换 sentence-transformers 本地模式) |
 | PRD解析 | pdfplumber + python-docx |
@@ -101,7 +102,10 @@
 #### 生成
 - `POST /parse-prd` — 上传解析 PRD 文件
 - `POST /generate` — 非流式生成并落库
-- `POST /generate/stream` — SSE 流式生成
+- `POST /generate/stream` — SSE 流式生成（请求内直连，随请求结束而中断）
+- `POST /generate/async` — 启动后台生成任务，立即返回 `{task_id, title, status, created_at}`；任务脱离请求运行，刷新/切走后仍继续
+- `GET /generate/active` — 列出仍在运行的生成任务，供刷新后「继续查看」
+- `GET /generate/stream/{task_id}` — 订阅指定任务的 SSE：先重放已缓存事件，再推送实时事件（支持断线重连续看）
 
 #### 审核
 - `GET /cases` — 最近 200 条用例，带审核状态
@@ -123,10 +127,13 @@
 ## SSE 流式生成协议
 
 ```
-event: progress  → {stage: "retrieving"|"constructing"|"generating", message: "..."}
+event: progress  → {stage: "retrieving"|"constructing"|"generating"|"validating"|"correcting", message: "..."}
 event: chunk     → {text: "(LLM 增量输出)"}
-event: complete  → {job_id: "...", cases: [...], knowledge_refs: {...}}
+event: complete  → {cases: [...], knowledge_used: {...}, knowledge_matches: {...}, validation_warnings: [...]}
+event: error     → {message: "..."}
 ```
+
+**后台任务模式（`/generate/async` + `/generate/stream/{task_id}`）**：事件由后台任务产生并缓存在内存中。客户端订阅时，先按序重放已缓存事件实现「断点续看」，再续接实时事件；任务结束后服务端关闭流。前端在应用加载时通过 `/generate/active` 发现运行中的任务并自动重连。
 
 ---
 
@@ -214,6 +221,7 @@ event: complete  → {job_id: "...", cases: [...], knowledge_refs: {...}}
 4. **Knowledge ref校验**: LLM输出的引用ID后处理验证，不存在则标记警告
 5. **Embedding先用云端 API**: 免本地模型下载，config支持切 sentence-transformers 本地模式
 6. **Element Plus按需导入**: `unplugin-vue-components` + `unplugin-auto-import` 控制打包体积
+7. **生成解耦后台任务**: 生成用 `asyncio.create_task` + 独立 DB 会话脱离请求，事件缓存在内存任务注册表中支持重连重放；前端状态提升到 Pinia store。代价是任务态为进程内内存，后端重启会丢失活动任务列表（已落库用例不受影响）
 
 ## 风险应对
 

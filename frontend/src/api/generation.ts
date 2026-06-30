@@ -63,6 +63,42 @@ export interface StatsOverview {
   generation_count: number
 }
 
+export interface GenerationTaskSummary {
+  task_id: string
+  title: string
+  status: 'running' | 'done' | 'error'
+  created_at: string
+}
+
+// 读取 SSE 流并按事件回调。供首发请求与重连共用。
+async function consumeSse(
+  response: Response,
+  onEvent: (event: GenerateStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    if (signal?.aborted) { await reader.cancel().catch(() => {}); break }
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    // SSE 以空行分隔事件，逐块解析 data: 行
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() ?? ''
+    for (const part of parts) {
+      const line = part.split('\n').find((l) => l.startsWith('data: '))
+      if (!line) continue
+      try {
+        onEvent(JSON.parse(line.slice(6)) as GenerateStreamEvent)
+      } catch {
+        // 忽略无法解析的片段
+      }
+    }
+  }
+}
+
 export const generationApi = {
   generate(data: GenerateRequest) { return client.post<any, GenerateResponse>('/generate', data) },
   async generateStream(data: GenerateRequest, onEvent: (event: GenerateStreamEvent) => void): Promise<void> {
@@ -74,26 +110,19 @@ export const generationApi = {
     if (!response.ok || !response.body) {
       throw new Error(`生成请求失败：${response.status}`)
     }
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      // SSE 以空行分隔事件，逐块解析 data: 行
-      const parts = buffer.split('\n\n')
-      buffer = parts.pop() ?? ''
-      for (const part of parts) {
-        const line = part.split('\n').find((l) => l.startsWith('data: '))
-        if (!line) continue
-        try {
-          onEvent(JSON.parse(line.slice(6)) as GenerateStreamEvent)
-        } catch {
-          // 忽略无法解析的片段
-        }
-      }
+    await consumeSse(response, onEvent)
+  },
+  // 启动后台生成任务，立即返回 task_id；任务脱离请求，刷新/切走后仍继续。
+  startTask(data: GenerateRequest) { return client.post<any, GenerationTaskSummary>('/generate/async', data) },
+  // 列出仍在运行的任务，供刷新后「继续查看」。
+  activeTasks() { return client.get<any, GenerationTaskSummary[]>('/generate/active') },
+  // 重连到指定任务的事件流：先重放已产生事件，再接收实时事件。
+  async streamTask(taskId: string, onEvent: (event: GenerateStreamEvent) => void, signal?: AbortSignal): Promise<void> {
+    const response = await fetch(`/api/v1/generate/stream/${taskId}`, { signal })
+    if (!response.ok || !response.body) {
+      throw new Error(`连接任务失败：${response.status}`)
     }
+    await consumeSse(response, onEvent, signal)
   },
   parsePrd(file: File) {
     const form = new FormData()
