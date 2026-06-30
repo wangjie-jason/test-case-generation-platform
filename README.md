@@ -15,7 +15,16 @@
 
 ## 快速开始
 
-### 1. 安装后端依赖
+### 1. 克隆仓库
+
+```bash
+git clone git@github.com:wangjie-jason/test-case-generation-platform.git
+cd test-case-generation-platform
+```
+
+> 需要 Python 3.10+、Node.js 18+。
+
+### 2. 安装后端依赖
 
 ```bash
 cd backend
@@ -24,23 +33,29 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. 配置 API Key
+### 3. 配置 API Key
 
 ```bash
-# 任意 OpenAI 兼容服务均可，以下以智谱 GLM 为例
-echo 'LLM_API_KEY=your-key-here
-LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
-LLM_MODEL=glm-4-flash' > backend/.env
+# 接上一步，仍在 backend 目录下；复制模板后填入自己的密钥（任意 OpenAI 兼容服务均可）
+cp .env.example .env
 ```
 
-### 3. 安装前端依赖
+`backend/.env` 默认示例为 OpenAI，按需改成你用的服务，例如智谱 GLM：
+
+```ini
+LLM_API_KEY=your-key-here
+LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
+LLM_MODEL=glm-4-flash
+```
+
+### 4. 安装前端依赖
 
 ```bash
 cd frontend
 npm install
 ```
 
-### 4. 启动
+### 5. 启动
 
 ```bash
 # 终端 1 - 后端
