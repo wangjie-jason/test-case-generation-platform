@@ -27,17 +27,17 @@ cd test-case-generation-platform
 ### 2. 安装后端依赖
 
 ```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+# 在项目根目录创建虚拟环境（PyCharm 打开项目时也会复用这个 venv）
+python3 -m venv venv
+source venv/bin/activate
+pip install -r backend/requirements.txt
 ```
 
 ### 3. 配置 API Key
 
 ```bash
-# 接上一步，仍在 backend 目录下；复制模板后填入自己的密钥（任意 OpenAI 兼容服务均可）
-cp .env.example .env
+# 在项目根目录执行；复制模板后填入自己的密钥（任意 OpenAI 兼容服务均可）
+cp backend/.env.example backend/.env
 ```
 
 `backend/.env` 默认示例为 OpenAI，按需改成你用的服务，例如智谱 GLM：
@@ -58,8 +58,8 @@ npm install
 ### 5. 启动
 
 ```bash
-# 终端 1 - 后端
-cd backend && source .venv/bin/activate && uvicorn app.main:app --port 8000
+# 终端 1 - 后端（在项目根目录激活 venv，再进 backend 启动）
+source venv/bin/activate && cd backend && uvicorn app.main:app --port 8000
 
 # 终端 2 - 前端
 cd frontend && npm run dev
