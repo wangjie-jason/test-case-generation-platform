@@ -34,11 +34,21 @@ class GeneratorService:
         cases = _parse_cases(raw_output)
 
         warnings = await ValidationService.validate_cases(db, cases)
-        if warnings:
-            corrected_cases = await _self_correct(llm, system_content, user_content, raw_output, warnings)
-            if _has_valid_cases(corrected_cases):
-                cases = corrected_cases
-                warnings = await ValidationService.validate_cases(db, cases)
+        # 评审 + 补充：保留好的、删掉有问题的、针对缺口补充，而非整批重写。
+        if _has_valid_cases(cases):
+            review = await _review_cases(llm, system_content, cases, warnings)
+            kept, deleted = _apply_review(cases, review.get("reviews", []))
+            if _has_valid_cases(kept):
+                cases = kept
+            else:
+                deleted = []
+            gaps = review.get("gaps", [])
+            if deleted or gaps:
+                supp_output = await _supplement(llm, system_content, cases, deleted, gaps)
+                supplements = [c for c in _parse_cases(supp_output) if c.get("title") and not c.get("error")]
+                if supplements:
+                    cases = cases + supplements
+            warnings = await ValidationService.validate_cases(db, cases)
 
         knowledge_counts = {"field_dicts_count": len(retrieval["field_dicts"]), "business_rules_count": len(retrieval["business_rules"]), "state_machines_count": len(retrieval["state_machines"]), "term_mappings_count": len(retrieval["term_mappings"]), "prd_chunks_count": len(retrieval.get("prd_chunks", [])), "defect_chunks_count": len(retrieval.get("defect_chunks", [])), "historical_cases_count": len(historical_cases)}
         knowledge_matches = _knowledge_matches(retrieval, historical_cases)
@@ -69,15 +79,31 @@ class GeneratorService:
         cases = _parse_cases(full_output)
         yield {"type": "progress", "stage": "validating", "message": "正在校验..."}
         warnings = await ValidationService.validate_cases(db, cases)
-        if warnings:
-            yield {"type": "progress", "stage": "correcting", "message": f"发现 {len(warnings)} 个问题，正在修正..."}
-            corrected_output = ""
-            async for chunk in _self_correct_stream(llm, system_content, user_content, full_output, warnings):
-                corrected_output += chunk; yield {"type": "chunk", "text": chunk}
-            corrected_cases = _parse_cases(corrected_output)
-            if _has_valid_cases(corrected_cases):
-                cases = corrected_cases
-                warnings = await ValidationService.validate_cases(db, cases)
+
+        # 评审：以测试专家身份逐条判定保留/删除，不改写已生成的用例。
+        if _has_valid_cases(cases):
+            yield {"type": "progress", "stage": "reviewing", "message": "测试专家正在评审用例..."}
+            review = await _review_cases(llm, system_content, cases, warnings)
+            kept, deleted = _apply_review(cases, review.get("reviews", []))
+            if _has_valid_cases(kept):
+                cases = kept
+            else:
+                deleted = []  # 评审把用例全删了，判定不可信，全部保留
+            gaps = review.get("gaps", [])
+            if deleted:
+                yield {"type": "progress", "stage": "reviewing", "message": f"评审删除 {len(deleted)} 条问题用例，保留 {len(cases)} 条"}
+
+            # 补充：仅针对被删场景与遗漏场景生成新用例，追加到保留的用例后。
+            if deleted or gaps:
+                yield {"type": "progress", "stage": "supplementing", "message": "正在补充遗漏场景的用例..."}
+                supp_output = ""
+                async for chunk in _supplement_stream(llm, system_content, cases, deleted, gaps):
+                    supp_output += chunk; yield {"type": "chunk", "text": chunk}
+                supplements = [c for c in _parse_cases(supp_output) if c.get("title") and not c.get("error")]
+                if supplements:
+                    cases = cases + supplements
+                    yield {"type": "progress", "stage": "supplementing", "message": f"补充 {len(supplements)} 条用例，共 {len(cases)} 条"}
+            warnings = await ValidationService.validate_cases(db, cases)
 
         yield {"type": "complete", "cases": cases, "knowledge_used": kc, "knowledge_matches": _knowledge_matches(retrieval, historical_cases), "validation_warnings": warnings}
 
@@ -141,19 +167,122 @@ def _has_valid_cases(cases: list[dict]) -> bool:
     return any(case.get("title") and not case.get("error") for case in cases)
 
 
-def _correction_prompt(output: str, warnings: list[dict]) -> str:
-    wt = "\n".join(f"- #{w['case_index']} {w['title']}: {'; '.join(w['warnings'])}" for w in warnings[:5])
-    return f"请修正以下问题后重新输出完整 JSON 数组：\n{wt}\n\n原始输出：\n{output}"
+def _case_brief(case: dict, idx: int) -> str:
+    """评审用：把一条用例压缩成简短文本，带序号。"""
+    steps = case.get("steps", "")
+    if isinstance(steps, list):
+        steps = "; ".join(str(s) for s in steps)
+    return (
+        f"#{idx} 【{case.get('priority', '')}】{case.get('title', '')}\n"
+        f"   前置：{(case.get('precondition') or '')[:80]}\n"
+        f"   步骤：{str(steps)[:160]}\n"
+        f"   预期：{(case.get('expected_result') or '')[:120]}"
+    )
 
 
-async def _self_correct(llm, system, user, output, warnings):
-    corrected = await llm.generate(system, _correction_prompt(output, warnings))
-    return _parse_cases(corrected)
+def _review_prompt(cases: list[dict], warnings: list[dict]) -> str:
+    briefs = "\n".join(_case_brief(c, i) for i, c in enumerate(cases))
+    warn_text = ""
+    if warnings:
+        wt = "\n".join(f"- #{w['case_index']} {'; '.join(w['warnings'])}" for w in warnings[:10])
+        warn_text = f"\n\n## 自动校验已发现的问题（供参考）\n{wt}"
+    return f"""你现在是测试评审专家。请逐条评审下面已生成的测试用例，判断每条是「保留」还是「删除」。
+
+删除标准（满足任一即删）：
+- 引用了不存在的字段/规则，或预期结果违反业务规则
+- 与其它用例完全重复
+- 步骤或预期含糊、不可执行、自相矛盾
+- 明显偏离需求
+
+注意：不要改写用例内容，只做保留/删除判断。同时指出整体上还遗漏了哪些应覆盖但当前没有的场景。
+
+## 待评审用例（共 {len(cases)} 条）
+{briefs}{warn_text}
+
+只输出如下 JSON（不要 markdown 代码块）：
+{{
+  "reviews": [{{"index": <用例序号>, "verdict": "keep|delete", "reason": "<简短理由>"}}],
+  "gaps": ["<遗漏场景1>", "<遗漏场景2>"]
+}}"""
 
 
-async def _self_correct_stream(llm, system, user, output, warnings):
-    async for chunk in llm.generate_stream(system, _correction_prompt(output, warnings)):
+async def _review_cases(llm, system: str, cases: list[dict], warnings: list[dict]) -> dict:
+    """调用 LLM 评审，返回 {reviews:[...], gaps:[...]}；失败时返回空（全部保留）。"""
+    try:
+        raw = await llm.generate(system, _review_prompt(cases, warnings))
+        parsed = _parse_json_object(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        logger.exception("用例评审失败，跳过删除与补充")
+    return {"reviews": [], "gaps": []}
+
+
+def _apply_review(cases: list[dict], reviews: list[dict]) -> tuple[list[dict], list[dict]]:
+    """按评审结论拆分为保留与删除两组。未被提及的用例默认保留。"""
+    delete_idx = {
+        r.get("index") for r in reviews
+        if isinstance(r, dict) and r.get("verdict") == "delete" and isinstance(r.get("index"), int)
+    }
+    kept = [c for i, c in enumerate(cases) if i not in delete_idx]
+    deleted = [c for i, c in enumerate(cases) if i in delete_idx]
+    return kept, deleted
+
+
+def _supplement_prompt(kept: list[dict], deleted: list[dict], gaps: list[str]) -> str:
+    kept_titles = "\n".join(f"- {c.get('title', '')}" for c in kept) or "（无）"
+    parts = []
+    if deleted:
+        parts.append("被删除（需用合格用例覆盖这些场景）：\n" + "\n".join(f"- {c.get('title', '')}" for c in deleted))
+    if gaps:
+        parts.append("评审指出的遗漏场景：\n" + "\n".join(f"- {g}" for g in gaps))
+    todo = "\n\n".join(parts) or "（补充能进一步提升覆盖率的场景）"
+    return f"""下面是评审后保留的合格用例标题，请勿重复它们：
+{kept_titles}
+
+请只针对以下需要补充的场景，生成新的合格测试用例（不要重复上面已有的，不要重新输出已有用例）：
+
+{todo}
+
+只输出新增用例的 JSON 数组（不要 markdown 代码块），格式与原用例一致（title/priority/precondition/steps/expected_result/knowledge_refs）。若无需补充则输出 []。"""
+
+
+async def _supplement(llm, system: str, kept: list[dict], deleted: list[dict], gaps: list[str]) -> str:
+    return await llm.generate(system, _supplement_prompt(kept, deleted, gaps))
+
+
+async def _supplement_stream(llm, system: str, kept: list[dict], deleted: list[dict], gaps: list[str]):
+    async for chunk in llm.generate_stream(system, _supplement_prompt(kept, deleted, gaps)):
         yield chunk
+
+
+def _parse_json_object(raw: str) -> dict | None:
+    """从 LLM 输出中解析出一个 JSON 对象（容忍 markdown 代码块包裹）。"""
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
+    if m:
+        try:
+            parsed = json.loads(m.group(1))
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    decoder = json.JSONDecoder()
+    start = raw.find("{")
+    while start != -1:
+        try:
+            parsed, _ = decoder.raw_decode(raw[start:])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+        start = raw.find("{", start + 1)
+    return None
 
 
 def _parse_cases(raw: str) -> list[dict]:

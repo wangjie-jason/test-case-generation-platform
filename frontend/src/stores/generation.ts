@@ -70,8 +70,8 @@ export const useGenerationStore = defineStore('generation', () => {
   function _handleEvent(event: Parameters<Parameters<typeof generationApi.streamTask>[1]>[0], onComplete: () => void) {
     if (event.type === 'progress') {
       genProgress.value = event.message
-      // 进入修正阶段时清空首轮输出，避免两轮文本拼接在一起
-      if (event.stage === 'correcting') streamText.value = ''
+      // 进入补充阶段时清空首轮流式文本，避免与补充用例的输出拼接在一起
+      if (event.stage === 'supplementing') streamText.value = ''
     } else if (event.type === 'chunk') {
       streamText.value += event.text
     } else if (event.type === 'complete') {
