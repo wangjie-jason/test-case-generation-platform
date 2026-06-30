@@ -1,77 +1,27 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
-import { generationApi, type CaseRecord, type KnowledgeMatches } from '@/api/generation'
-import { kbApi } from '@/api/knowledge'
+import { onMounted, computed } from 'vue'
+import { storeToRefs } from 'pinia'
+import { generationApi, type CaseRecord } from '@/api/generation'
 import { ElMessage } from 'element-plus'
-import type { KnowledgeBase } from '@/types/project'
-import type { GeneratedTestCase } from '@/types/testCase'
+import { useGenerationStore } from '@/stores/generation'
 import { UploadFilled } from '@element-plus/icons-vue'
 
-const kbs = ref<KnowledgeBase[]>([])
-const selectedKbs = ref<string[]>([])
-const requirementText = ref('')
-const batchName = ref('')
-const inputMode = ref<'text' | 'file'>('text')
-const isParsing = ref(false); const parsedFilename = ref('')
-const isGenerating = ref(false); const cases = ref<GeneratedTestCase[]>([])
-const genProgress = ref('')
-const streamText = ref('')
-const knowledgeCounts = ref<Record<string, number>>({})
-const knowledgeMatches = ref<KnowledgeMatches>({})
-const validationWarnings = ref<any[]>([])
-const tabActive = ref<'generate' | 'history'>('generate')
-const history = ref<CaseRecord[]>([])
+const store = useGenerationStore()
+// 生成状态保存在 store 中，切换页面/tab 后回到本页仍保留实时进度与结果
+const {
+  kbs, selectedKbs, requirementText, batchName, inputMode, isParsing, parsedFilename,
+  tabActive, isGenerating, cases, genProgress, streamText, knowledgeCounts,
+  knowledgeMatches, history,
+} = storeToRefs(store)
 
-onMounted(async () => { kbs.value = await kbApi.list(); fetchHistory() })
+onMounted(() => { store.fetchKbs(); store.fetchHistory() })
 
-async function fetchHistory() {
-  try { history.value = await generationApi.listCases() }
-  catch { ElMessage.error('加载生成历史失败') }
+function handlePrdUpload(options: any) {
+  return store.parsePrd(options.file)
 }
 
-async function handlePrdUpload(options: any) {
-  isParsing.value = true; parsedFilename.value = ''
-  try {
-    const data = await generationApi.parsePrd(options.file)
-    requirementText.value = data.text; parsedFilename.value = data.filename
-    ElMessage.success(`解析 ${data.length} 字`)
-  } catch (e: any) { ElMessage.error(e.message) }
-  finally { isParsing.value = false }
-}
-
-async function handleGenerate() {
-  if (!requirementText.value.trim()) { ElMessage.warning('请输入需求'); return }
-  isGenerating.value = true; cases.value = []; knowledgeCounts.value = {}; knowledgeMatches.value = {}; validationWarnings.value = []
-  genProgress.value = '正在准备...'; streamText.value = ''
-  try {
-    let completed = false
-    await generationApi.generateStream(
-      { kb_ids: selectedKbs.value, requirement_text: requirementText.value, batch_name: batchName.value },
-      (event) => {
-        if (event.type === 'progress') {
-          genProgress.value = event.message
-          // 进入修正阶段时清空首轮输出，避免两轮文本拼接在一起
-          if (event.stage === 'correcting') streamText.value = ''
-        } else if (event.type === 'chunk') {
-          streamText.value += event.text
-        } else if (event.type === 'complete') {
-          cases.value = event.cases || []
-          knowledgeCounts.value = event.knowledge_used || {}
-          knowledgeMatches.value = event.knowledge_matches || {}
-          validationWarnings.value = (event.validation_warnings as any[]) || []
-          completed = true
-        } else if (event.type === 'error') {
-          throw new Error(event.message)
-        }
-      },
-    )
-    if (completed) {
-      ElMessage.success(`生成完成，共 ${cases.value.length} 条`)
-    } else {
-      ElMessage.warning('生成已结束，但未收到完整结果')
-    }
-  } catch (e: any) { ElMessage.error(e.message) }
-  finally { isGenerating.value = false; genProgress.value = ''; fetchHistory() }
+function handleGenerate() {
+  return store.generate()
 }
 
 async function downloadCases() {

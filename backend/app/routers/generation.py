@@ -1,5 +1,5 @@
+import asyncio
 import json
-import uuid as _uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -10,33 +10,13 @@ from app.database import get_db
 from app.models.test_case import TestCase
 from app.schemas.generation import GenerateRequest, GenerateResponse
 from app.services.generator_service import GeneratorService
-from app.services.indexing_service import IndexingService
 from app.services.llm_service import LLMServiceError
 from app.services.parser_service import ParserService
+from app.services.task_service import TaskManager, persist_cases
 
 router = APIRouter()
 
-
-async def _persist_cases(db: AsyncSession, cases: list[dict], batch_name: str | None, requirement_text: str) -> str:
-    """将生成的用例写入数据库，返回 batch_id。"""
-    batch_id = str(_uuid.uuid4())
-    created = []
-    for c in cases:
-        steps = c.get("steps", "")
-        if isinstance(steps, list): steps = json.dumps(steps, ensure_ascii=False)
-        tc = TestCase(
-            title=c.get("title", ""), precondition=c.get("precondition", ""),
-            steps=steps, expected_result=c.get("expected_result", ""),
-            source="ai", batch_id=batch_id, req_text=batch_name or requirement_text[:80],
-            knowledge_refs=json.dumps(c.get("knowledge_refs", []), ensure_ascii=False),
-        )
-        db.add(tc)
-        created.append(tc)
-    await db.commit()
-    # 生成的用例回灌历史用例向量库，作为后续生成的 few-shot 语料。
-    for tc in created:
-        await IndexingService.index_case(tc)
-    return batch_id
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
 @router.post("/generate", response_model=GenerateResponse)
@@ -46,7 +26,7 @@ async def generate_test_cases(body: GenerateRequest, db: AsyncSession = Depends(
     except LLMServiceError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
-    await _persist_cases(db, result["cases"], body.batch_name, body.requirement_text)
+    await persist_cases(db, result["cases"], body.batch_name, body.requirement_text)
     return result
 
 
@@ -56,11 +36,49 @@ async def generate_stream(body: GenerateRequest, db: AsyncSession = Depends(get_
         try:
             async for event in GeneratorService.generate_stream(db, body.requirement_text, kb_ids=body.kb_ids if body.kb_ids else None):
                 if event.get("type") == "complete":
-                    await _persist_cases(db, event.get("cases", []), body.batch_name, body.requirement_text)
+                    await persist_cases(db, event.get("cases", []), body.batch_name, body.requirement_text)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except LLMServiceError as exc:
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
-    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+@router.post("/generate/async")
+async def generate_async(body: GenerateRequest):
+    """启动后台生成任务，立即返回 task_id。任务脱离本请求运行，
+    客户端断开/刷新后仍继续，可凭 task_id 重连观看实时进度。"""
+    task = TaskManager.create(
+        body.requirement_text, body.batch_name, body.kb_ids if body.kb_ids else None
+    )
+    return task.summary()
+
+
+@router.get("/generate/active")
+async def generate_active():
+    """列出当前仍在运行的生成任务，供前端在刷新后提供「继续查看」入口。"""
+    return [t.summary() for t in TaskManager.active()]
+
+
+@router.get("/generate/stream/{task_id}")
+async def generate_stream_reconnect(task_id: str):
+    """订阅指定任务的事件流：先重放已产生的事件，再推送后续实时事件。
+    支持刷新页面后重连，断点续看。"""
+    task = TaskManager.get(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在或已过期")
+
+    async def stream():
+        queue = task.subscribe()
+        try:
+            while True:
+                event = await queue.get()
+                if event.get("type") == "__end__":
+                    break
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            task.unsubscribe(queue)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 @router.get("/cases")

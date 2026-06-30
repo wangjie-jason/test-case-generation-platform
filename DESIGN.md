@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 设计方案
 
-> 版本 v0.5 | 更新 2026-06-13 | 状态：全功能交付
+> 版本 v0.6 | 更新 2026-06-30 | 状态：全功能交付 + 生成任务可重连
 
 ## 1. 系统架构总览
 
@@ -182,6 +182,31 @@ VIP免运费 | user_level='vip' → freight=0 | 硬规则   | 订单模块 | PRD
 输出要求：每条用例包含 模块、场景、用例标题、前置条件、测试步骤（序号+操作+数据）、预期结果。以JSON数组格式输出。
 ```
 
+#### 生成任务的可靠性设计（后台任务 + 断线重连）
+
+生成是耗时长任务（检索 + LLM 流式 + 自我修正可达数十秒），不能绑定在单次 HTTP 请求或某个前端页面组件的生命周期上。设计为：
+
+```
+前端点击生成
+   │  POST /generate/async
+   ▼
+后端 TaskManager.create() ──→ asyncio.create_task（独立 DB 会话）
+   │  立即返回 task_id          后台任务持续运行，不受客户端断开影响
+   ▼                                  │
+前端凭 task_id 订阅 SSE                 │ 边生成边把事件缓存进 task.events
+   GET /generate/stream/{task_id}      ▼
+   ├─ 先重放已缓存事件（断点续看）   生成完成时落库（persist_cases）
+   └─ 再接收后续实时事件
+```
+
+- **任务脱离请求**：后台任务用独立 DB 会话运行，前端切页面/刷新/关闭标签页都不会中断生成，结果照常落库。
+- **事件缓存 + 重放**：每个任务把所有 SSE 事件缓存在内存中，重连时先重放历史事件、再续接实时流，实现「刷新后断点续看」。
+- **活动任务发现**：`GET /generate/active` 列出运行中的任务，前端在应用加载时据此自动重连，并在全局页头展示可点击的「生成中」入口。
+- **内存治理**：已完成任务按 TTL（默认 1 小时）与数量上限（默认 50）淘汰，避免长时间运行内存膨胀。
+- **已知边界**：任务注册表为进程内内存态，后端进程重启会丢失「活动任务」列表（已落库的用例不受影响）；如需跨重启续看，需将任务状态持久化到 DB。
+
+> 前端状态同样从视图组件提升到 Pinia store（`stores/generation.ts`），生成状态（进度、流式文本、结果）与页面解耦，切换 tab/路由均不丢失。
+
 ---
 
 ### 2.3 审核与反馈闭环模块
@@ -266,7 +291,7 @@ VIP免运费 | user_level='vip' → freight=0 | 硬规则   | 订单模块 | PRD
 | 前端 | Vue 3 + Element Plus | 生态成熟、表格/表单组件丰富、适合B端、用户指定 |
 | 后端 | Python + FastAPI | 与AI/LLM生态无缝对接、开发效率高 |
 | 关系数据库 | SQLite（开发）→ PostgreSQL（生产） | SQLite零配置起步；PostgreSQL支持pgvector扩展 |
-| 向量数据库 | ChromaDB | 轻量、Python原生、与LangChain集成好、适合嵌入式场景 |
+| 向量数据库 | ChromaDB 1.5.x | 轻量、Python原生、适合嵌入式场景（1.x 修复了 0.5.x 与 posthog 7.x 遥测不兼容的报错） |
 | LLM SDK | 自封装调用（OpenAI 兼容格式） | 与Qwen API格式一致，方便切换 |
 | Excel处理 | openpyxl | Python Excel处理的事实标准 |
 | PRD解析 | pdfplumber + python-docx | PDF文本提取 + Word文档解析 |
@@ -365,6 +390,9 @@ review_records  -- 审核记录 (id, case_id, status[approved|rejected], reject_
 2. **状态可达性检查**：如果需求涉及状态变更，是否在状态机中存在合法路径？
 
 如果检查不通过，先生成"知识缺失预警"，提示用户先补充知识再用例生成。
+
+### 6.4 生成解耦：后台任务 + 前端状态提升
+长任务生成不绑定 HTTP 请求与页面组件——后端用 `asyncio.create_task` + 独立 DB 会话跑后台任务并缓存 SSE 事件，前端把生成状态提升到 Pinia store。两者共同保证「切页面/刷新/重连」都能断点续看，详见 2.2「生成任务的可靠性设计」。
 
 ---
 

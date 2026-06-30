@@ -2,7 +2,7 @@ fastapi==0.115.*
 uvicorn[standard]==0.34.*
 sqlalchemy[asyncio]==2.0.*
 aiosqlite==0.20.*
-chromadb==0.5.*
+chromadb>=1.5,<2.0
 httpx==0.28.*
 openpyxl==3.1.*
 pdfplumber==0.11.*
