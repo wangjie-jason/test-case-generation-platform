@@ -4,14 +4,14 @@ import { storeToRefs } from 'pinia'
 import { generationApi, type CaseRecord } from '@/api/generation'
 import { ElMessage } from 'element-plus'
 import { useGenerationStore } from '@/stores/generation'
-import { UploadFilled } from '@element-plus/icons-vue'
+import { UploadFilled, Loading, Close } from '@element-plus/icons-vue'
 
 const store = useGenerationStore()
 // 生成状态保存在 store 中，切换页面/tab 后回到本页仍保留实时进度与结果
 const {
   kbs, selectedKbs, requirementText, batchName, inputMode, isParsing, parsedFilename,
   tabActive, isGenerating, cases, genProgress, streamText, knowledgeCounts,
-  knowledgeMatches, history,
+  knowledgeMatches, history, taskList, activeTaskId, runningCount,
 } = storeToRefs(store)
 
 onMounted(() => { store.fetchKbs(); store.fetchHistory() })
@@ -146,9 +146,29 @@ async function downloadBatch(batch: { req_text?: string | null; created_at?: str
                 <el-option v-for="k in kbs" :key="k.id" :label="k.name" :value="k.id" />
               </el-select>
             </div>
-            <el-button type="primary" size="large" :loading="isGenerating" @click="handleGenerate" style="margin-top:12px;width:100%">
-              {{ isGenerating ? '生成中...' : '生成测试用例' }}
+            <el-button type="primary" size="large" @click="handleGenerate" style="margin-top:12px;width:100%">
+              {{ runningCount > 0 ? `生成测试用例（另起一个，当前 ${runningCount} 个进行中）` : '生成测试用例' }}
             </el-button>
+
+            <!-- 并行任务列表：可同时进行多个生成，点击查看各自进度/结果 -->
+            <div v-if="taskList.length" class="task-list">
+              <div class="task-list-title">生成任务（{{ taskList.length }}）</div>
+              <div
+                v-for="t in taskList"
+                :key="t.taskId"
+                class="task-item"
+                :class="{ active: t.taskId === activeTaskId }"
+                @click="store.viewTask(t.taskId)"
+              >
+                <el-icon v-if="t.status === 'running'" class="spin task-status"><Loading /></el-icon>
+                <span v-else class="task-status" :class="t.status">{{ t.status === 'done' ? '✓' : '✕' }}</span>
+                <span class="task-name">{{ t.title }}</span>
+                <span class="task-meta">
+                  {{ t.status === 'running' ? (t.genProgress || '生成中') : (t.status === 'done' ? `${t.cases.length} 条` : '失败') }}
+                </span>
+                <el-icon v-if="t.status !== 'running'" class="task-close" @click.stop="store.dismissTask(t.taskId)"><Close /></el-icon>
+              </div>
+            </div>
           </el-card>
         </div>
 
@@ -251,6 +271,20 @@ async function downloadBatch(batch: { req_text?: string | null; created_at?: str
 .batch-req { display: block; font-size: 12px; color: #909399; }
 .batch-time { display: block; font-size: 11px; color: #c0c4cc; }
 .history-tab { max-width: 960px; margin: 0 auto; }
+.task-list { margin-top: 14px; border-top: 1px solid #ebeef5; padding-top: 10px; }
+.task-list-title { font-size: 12px; color: #909399; margin-bottom: 6px; }
+.task-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.task-item:hover { background: #f5f7fa; }
+.task-item.active { background: #ecf5ff; }
+.task-status { flex-shrink: 0; width: 16px; text-align: center; }
+.task-status.done { color: #67C23A; }
+.task-status.error { color: #F56C6C; }
+.task-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-meta { flex-shrink: 0; font-size: 12px; color: #909399; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-close { flex-shrink: 0; color: #c0c4cc; }
+.task-close:hover { color: #F56C6C; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @media (max-width: 900px) {
   .top-panels { flex-direction: column; }
   .input-panel { flex: none; }

@@ -8,55 +8,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.test_case import TestCase
-from app.schemas.generation import GenerateRequest, GenerateResponse
-from app.services.generator_service import GeneratorService
-from app.services.llm_service import LLMServiceError
+from app.schemas.generation import GenerateRequest
 from app.services.parser_service import ParserService
-from app.services.task_service import TaskManager, persist_cases
+from app.services.task_service import TaskManager
 
 router = APIRouter()
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
-@router.post("/generate", response_model=GenerateResponse)
-async def generate_test_cases(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
-    try:
-        result = await GeneratorService.generate(db, body.requirement_text, kb_ids=body.kb_ids if body.kb_ids else None)
-    except LLMServiceError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-
-    await persist_cases(db, result["cases"], body.batch_name, body.requirement_text)
-    return result
-
-
-@router.post("/generate/stream")
-async def generate_stream(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
-    async def stream():
-        try:
-            async for event in GeneratorService.generate_stream(db, body.requirement_text, kb_ids=body.kb_ids if body.kb_ids else None):
-                if event.get("type") == "complete":
-                    await persist_cases(db, event.get("cases", []), body.batch_name, body.requirement_text)
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        except LLMServiceError as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
-    return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
-
-
 @router.post("/generate/async")
 async def generate_async(body: GenerateRequest):
     """启动后台生成任务，立即返回 task_id。任务脱离本请求运行，
-    客户端断开/刷新后仍继续，可凭 task_id 重连观看实时进度。"""
+    客户端断开/刷新后仍继续，可凭 task_id 重连观看实时进度。
+    body.client_id 作为归属者，实现多人/多浏览器隔离。"""
     task = TaskManager.create(
-        body.requirement_text, body.batch_name, body.kb_ids if body.kb_ids else None
+        body.requirement_text, body.batch_name, body.kb_ids if body.kb_ids else None,
+        owner_id=body.client_id,
     )
     return task.summary()
 
 
 @router.get("/generate/active")
-async def generate_active():
-    """列出当前仍在运行的生成任务，供前端在刷新后提供「继续查看」入口。"""
-    return [t.summary() for t in TaskManager.active()]
+async def generate_active(client_id: str | None = None):
+    """列出运行中的生成任务，供前端在刷新后提供「继续查看」入口。
+    传入 client_id 时只返回该浏览器/用户自己的任务，避免串到他人任务。"""
+    return [t.summary() for t in TaskManager.active(owner_id=client_id)]
 
 
 @router.get("/generate/stream/{task_id}")

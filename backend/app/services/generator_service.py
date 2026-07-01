@@ -18,49 +18,6 @@ logger = logging.getLogger(__name__)
 class GeneratorService:
 
     @staticmethod
-    async def generate(db: AsyncSession, requirement_text: str, kb_ids: list[str] | None = None) -> dict:
-        retrieval = await RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)
-        historical_cases = await _get_historical_cases(requirement_text, retrieval["query_keywords"], kb_ids)
-
-        system_content, user_content = PromptService.build(
-            requirement_text=requirement_text, field_dicts=retrieval["field_dicts"],
-            business_rules=retrieval["business_rules"], state_machines=retrieval["state_machines"],
-            term_mappings=retrieval["term_mappings"], defect_chunks=retrieval.get("defect_chunks"),
-            prd_chunks=retrieval.get("prd_chunks"), historical_cases=historical_cases,
-        )
-
-        llm = LLMService()
-        raw_output = await llm.generate(system_content, user_content)
-        cases = _parse_cases(raw_output)
-
-        warnings = await ValidationService.validate_cases(db, cases)
-        # 评审 + 补充：保留好的、删掉有问题的、针对缺口补充，而非整批重写。
-        if _has_valid_cases(cases):
-            review = await _review_cases(llm, system_content, cases, warnings)
-            kept, deleted = _apply_review(cases, review.get("reviews", []))
-            if _has_valid_cases(kept):
-                cases = kept
-            else:
-                deleted = []
-            gaps = review.get("gaps", [])
-            if deleted or gaps:
-                supp_output = await _supplement(llm, system_content, cases, deleted, gaps)
-                supplements = [c for c in _parse_cases(supp_output) if c.get("title") and not c.get("error")]
-                if supplements:
-                    cases = cases + supplements
-            warnings = await ValidationService.validate_cases(db, cases)
-
-        knowledge_counts = {"field_dicts_count": len(retrieval["field_dicts"]), "business_rules_count": len(retrieval["business_rules"]), "state_machines_count": len(retrieval["state_machines"]), "term_mappings_count": len(retrieval["term_mappings"]), "prd_chunks_count": len(retrieval.get("prd_chunks", [])), "defect_chunks_count": len(retrieval.get("defect_chunks", [])), "historical_cases_count": len(historical_cases)}
-        knowledge_matches = _knowledge_matches(retrieval, historical_cases)
-
-        return {
-            "cases": cases,
-            "knowledge_used": knowledge_counts,
-            "knowledge_matches": knowledge_matches,
-            "validation_warnings": warnings,
-        }
-
-    @staticmethod
     async def generate_stream(db: AsyncSession, requirement_text: str, kb_ids: list[str] | None = None) -> AsyncGenerator[dict, None]:
         yield {"type": "progress", "stage": "retrieving", "message": "正在检索知识库..."}
         retrieval = await RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)
@@ -245,10 +202,6 @@ def _supplement_prompt(kept: list[dict], deleted: list[dict], gaps: list[str]) -
 {todo}
 
 只输出新增用例的 JSON 数组（不要 markdown 代码块），格式与原用例一致（title/priority/precondition/steps/expected_result/knowledge_refs）。若无需补充则输出 []。"""
-
-
-async def _supplement(llm, system: str, kept: list[dict], deleted: list[dict], gaps: list[str]) -> str:
-    return await llm.generate(system, _supplement_prompt(kept, deleted, gaps))
 
 
 async def _supplement_stream(llm, system: str, kept: list[dict], deleted: list[dict], gaps: list[str]):
