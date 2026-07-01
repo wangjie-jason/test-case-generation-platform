@@ -46,11 +46,14 @@ async def persist_cases(db, cases: list[dict], batch_name: str | None, requireme
 class GenerationTask:
     """一次后台生成任务。事件被缓存在 events 中，支持断线/刷新后重连重放。"""
 
-    def __init__(self, requirement_text: str, batch_name: str | None, kb_ids: list[str] | None):
+    def __init__(self, requirement_text: str, batch_name: str | None, kb_ids: list[str] | None, owner_id: str | None = None):
         self.id = str(_uuid.uuid4())
         self.requirement_text = requirement_text
         self.batch_name = batch_name
         self.kb_ids = kb_ids
+        # 归属者 ID：中立命名，当前来自前端 localStorage 的匿名 client_id，
+        # 将来引入登录账号时只需把来源换成 user.id，本类逻辑无需改动。
+        self.owner_id = owner_id
         self.title = (batch_name or requirement_text or "").strip()[:40] or "未命名需求"
         self.created_at = now_local()
         self.status = "running"  # running | done | error
@@ -83,6 +86,7 @@ class GenerationTask:
             "task_id": self.id,
             "title": self.title,
             "status": self.status,
+            "owner_id": self.owner_id,
             "created_at": str(self.created_at),
         }
 
@@ -91,9 +95,9 @@ class TaskManager:
     _tasks: dict[str, GenerationTask] = {}
 
     @classmethod
-    def create(cls, requirement_text: str, batch_name: str | None, kb_ids: list[str] | None) -> GenerationTask:
+    def create(cls, requirement_text: str, batch_name: str | None, kb_ids: list[str] | None, owner_id: str | None = None) -> GenerationTask:
         cls._prune()
-        task = GenerationTask(requirement_text, batch_name, kb_ids)
+        task = GenerationTask(requirement_text, batch_name, kb_ids, owner_id)
         cls._tasks[task.id] = task
         asyncio.create_task(cls._run(task))
         return task
@@ -103,9 +107,12 @@ class TaskManager:
         return cls._tasks.get(task_id)
 
     @classmethod
-    def active(cls) -> list[GenerationTask]:
-        """返回运行中的任务（最近创建的在前），供前端提供「继续查看」入口。"""
+    def active(cls, owner_id: str | None = None) -> list[GenerationTask]:
+        """返回运行中的任务（最近创建的在前），供前端提供「继续查看」入口。
+        传入 owner_id 时只返回该归属者的任务，实现多人/多浏览器隔离。"""
         running = [t for t in cls._tasks.values() if t.status == "running"]
+        if owner_id is not None:
+            running = [t for t in running if t.owner_id == owner_id]
         return sorted(running, key=lambda t: t.created_at, reverse=True)
 
     @classmethod

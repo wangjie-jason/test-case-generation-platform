@@ -1,10 +1,12 @@
 import client from './client'
+import { getClientId } from '@/utils/clientId'
 import type { GeneratedTestCase, TestCase } from '@/types/testCase'
 
 export interface GenerateRequest {
   kb_ids: string[]
   requirement_text: string
   batch_name?: string
+  client_id?: string
 }
 
 export interface KnowledgeMatches {
@@ -15,13 +17,6 @@ export interface KnowledgeMatches {
   prd_chunks?: Array<Record<string, unknown>>
   defect_chunks?: Array<Record<string, unknown>>
   historical_cases?: Array<Record<string, unknown>>
-}
-
-export interface GenerateResponse {
-  cases: GeneratedTestCase[]
-  knowledge_used: Record<string, number>
-  knowledge_matches: KnowledgeMatches
-  validation_warnings: unknown[] | null
 }
 
 export interface ParsedPrd {
@@ -67,6 +62,7 @@ export interface GenerationTaskSummary {
   task_id: string
   title: string
   status: 'running' | 'done' | 'error'
+  owner_id?: string | null
   created_at: string
 }
 
@@ -100,22 +96,14 @@ async function consumeSse(
 }
 
 export const generationApi = {
-  generate(data: GenerateRequest) { return client.post<any, GenerateResponse>('/generate', data) },
-  async generateStream(data: GenerateRequest, onEvent: (event: GenerateStreamEvent) => void): Promise<void> {
-    const response = await fetch('/api/v1/generate/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    })
-    if (!response.ok || !response.body) {
-      throw new Error(`生成请求失败：${response.status}`)
-    }
-    await consumeSse(response, onEvent)
-  },
   // 启动后台生成任务，立即返回 task_id；任务脱离请求，刷新/切走后仍继续。
-  startTask(data: GenerateRequest) { return client.post<any, GenerationTaskSummary>('/generate/async', data) },
-  // 列出仍在运行的任务，供刷新后「继续查看」。
-  activeTasks() { return client.get<any, GenerationTaskSummary[]>('/generate/active') },
+  startTask(data: GenerateRequest) {
+    return client.post<any, GenerationTaskSummary>('/generate/async', { ...data, client_id: getClientId() })
+  },
+  // 列出本客户端仍在运行的任务，供刷新后「继续查看」。
+  activeTasks() {
+    return client.get<any, GenerationTaskSummary[]>('/generate/active', { params: { client_id: getClientId() } })
+  },
   // 重连到指定任务的事件流：先重放已产生事件，再接收实时事件。
   async streamTask(taskId: string, onEvent: (event: GenerateStreamEvent) => void, signal?: AbortSignal): Promise<void> {
     const response = await fetch(`/api/v1/generate/stream/${taskId}`, { signal })

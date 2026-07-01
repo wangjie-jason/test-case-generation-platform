@@ -7,10 +7,10 @@ import { useGenerationStore } from '@/stores/generation'
 
 const router = useRouter()
 const store = useGenerationStore()
-const { isGenerating, genProgress, taskTitle } = storeToRefs(store)
+const { anyRunning, runningCount, genProgress, taskTitle } = storeToRefs(store)
 
-// 应用加载/刷新后，若后台仍有运行中的生成任务，自动重连以便继续观看进度
-onMounted(() => { store.restoreActiveTask() })
+// 应用加载/刷新后，若后台仍有本客户端运行中的生成任务，自动重连以便继续观看进度
+onMounted(() => { store.restoreActiveTasks() })
 
 function goWatch() {
   store.tabActive = 'generate'
@@ -22,13 +22,16 @@ function goWatch() {
   <header class="app-header">
     <h1 class="header-title">Test Case Generation Platform</h1>
     <div
-      v-if="isGenerating"
+      v-if="anyRunning"
       class="gen-indicator"
       title="点击查看生成进度"
       @click="goWatch"
     >
       <el-icon class="spin"><Loading /></el-icon>
-      <span class="gen-text">{{ taskTitle || '用例生成中' }}：{{ genProgress || '生成中...' }}</span>
+      <span class="gen-text">
+        <template v-if="runningCount > 1">{{ runningCount }} 个任务生成中</template>
+        <template v-else>{{ taskTitle || '用例生成中' }}：{{ genProgress || '生成中...' }}</template>
+      </span>
       <span class="gen-link">查看</span>
     </div>
   </header>
