@@ -38,6 +38,9 @@ export const useGenerationStore = defineStore('generation', () => {
   const inputMode = ref<'text' | 'file'>('text')
   const isParsing = ref(false)
   const parsedFilename = ref('')
+  // 需求补全：clarifiedText 为知识库补全后的结构化需求，可编辑；有值时作为生成输入
+  const clarifiedText = ref('')
+  const isClarifying = ref(false)
   const tabActive = ref<'generate' | 'history'>('generate')
 
   // 多任务：taskId -> 任务状态。并行生成的核心。
@@ -134,15 +137,38 @@ export const useGenerationStore = defineStore('generation', () => {
     }
   }
 
-  async function generate() {
+  // 调用知识库补全需求，结果写入 clarifiedText（可编辑）
+  async function clarify() {
     if (!requirementText.value.trim()) {
+      ElMessage.warning('请先输入需求')
+      return
+    }
+    isClarifying.value = true
+    try {
+      const res = await generationApi.clarify({
+        kb_ids: selectedKbs.value,
+        requirement_text: requirementText.value,
+      })
+      clarifiedText.value = res.clarified_text || ''
+      ElMessage.success('已根据知识库补全需求，请确认或修改后生成')
+    } catch (e: any) {
+      ElMessage.error(e.message)
+    } finally {
+      isClarifying.value = false
+    }
+  }
+
+  async function generate() {
+    // 有补全后的需求则优先用它生成（知识库已补齐缺失逻辑），否则用原始需求
+    const reqText = (clarifiedText.value.trim() || requirementText.value.trim())
+    if (!reqText) {
       ElMessage.warning('请输入需求')
       return
     }
     try {
       const summary = await generationApi.startTask({
         kb_ids: selectedKbs.value,
-        requirement_text: requirementText.value,
+        requirement_text: reqText,
         batch_name: batchName.value,
       })
       const t = newTaskState(summary.task_id, summary.title)
@@ -194,6 +220,8 @@ export const useGenerationStore = defineStore('generation', () => {
     inputMode,
     isParsing,
     parsedFilename,
+    clarifiedText,
+    isClarifying,
     tabActive,
     // 多任务
     taskList,
@@ -213,6 +241,7 @@ export const useGenerationStore = defineStore('generation', () => {
     fetchKbs,
     fetchHistory,
     parsePrd,
+    clarify,
     generate,
     viewTask,
     dismissTask,

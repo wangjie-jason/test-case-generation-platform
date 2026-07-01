@@ -92,6 +92,95 @@ class PromptService:
 - [ ] 是否覆盖了历史缺陷中提到的风险点？
 - [ ] 测试步骤是否具体可执行（含测试数据）？"""
 
+    # 需求补全（澄清）阶段的系统提示：不写用例，只把简略需求结合知识库补成结构化完整需求。
+    CLARIFY_SYSTEM = """你是一名资深业务分析师兼测试专家。你的任务不是编写测试用例，而是把用户提供的、可能比较简略的需求，结合知识库补全成一份【结构化的完整需求说明】，供后续设计测试用例使用。
+
+## 可用知识库信息
+### 字段字典
+{field_dicts}
+
+### 业务规则
+{business_rules}
+
+### 状态机
+{state_machines}
+
+### 术语映射
+{term_mappings}
+
+### 历史缺陷
+{defects}
+
+### 相关历史用例（仅供理解业务粒度）
+{historical_cases}
+
+## 补全要求
+1. 保留用户原始需求的意图，不得改变或缩小其范围
+2. 结合知识库补出需求中【隐含但重要】的逻辑：涉及的字段及取值约束、必须遵守的业务规则、相关状态流转、异常与边界场景、历史上出过问题的风险点
+3. 只能依据上述知识库与常识补充，【严禁编造】知识库中不存在的字段、规则或状态
+4. 对你补充的（原始需求未明确提及的）内容，在该条目末尾标注「（补充）」，方便用户识别与修改
+5. 某类信息知识库中没有，就不写该部分，不要硬凑
+
+## 输出格式（Markdown，禁止输出 JSON，禁止输出测试用例）
+## 功能概述
+（一段话说明这个需求做什么）
+
+## 输入与字段约束
+- 字段名（页面名）：类型 / 取值约束
+
+## 业务规则
+- 规则描述
+
+## 状态流转
+- 实体：源状态 → 目标状态（触发条件）
+
+## 异常与边界场景
+- 场景描述
+
+## 需重点回归的风险点
+- 来自历史缺陷的风险点"""
+
+    @staticmethod
+    def build_clarify(
+        requirement_text: str,
+        field_dicts: list[dict],
+        business_rules: list[dict],
+        state_machines: list[dict],
+        term_mappings: list[dict],
+        defect_chunks: list[dict] | None = None,
+        prd_chunks: list[dict] | None = None,
+        historical_cases: list[dict] | None = None,
+    ) -> tuple[str, str]:
+        """构造「需求补全」调用的 system/user。产出结构化完整需求，而非测试用例。"""
+        fd_table = PromptService._format_field_dicts(field_dicts)
+        br_table = PromptService._format_business_rules(business_rules)
+        sm_table = PromptService._format_state_machines(state_machines)
+        tm_table = PromptService._format_term_mappings(term_mappings)
+        few_shot = PromptService._format_historical_cases(historical_cases or [])
+
+        defect_text = "（无历史缺陷记录）"
+        if defect_chunks:
+            unique_texts = list(dict.fromkeys(d.get("text", "") for d in defect_chunks if d.get("text")))
+            if unique_texts:
+                defect_text = "\n".join(f"- {t[:300]}" for t in unique_texts[:5])
+
+        prd_text = ""
+        if prd_chunks:
+            unique_texts = list(dict.fromkeys(d.get("text", "") for d in prd_chunks if d.get("text")))
+            if unique_texts:
+                prd_text = "\n## 相关PRD文档内容\n" + "\n---\n".join(t[:800] for t in unique_texts[:5])
+
+        system_content = PromptService.CLARIFY_SYSTEM.format(
+            field_dicts=fd_table, business_rules=br_table, state_machines=sm_table,
+            term_mappings=tm_table, defects=defect_text, historical_cases=few_shot,
+        )
+        user_content = f"""## 原始需求（可能较简略，请结合知识库补全）
+{requirement_text}
+{prd_text}
+
+请输出补全后的结构化需求说明（Markdown），不要输出测试用例。"""
+        return system_content, user_content
+
     @staticmethod
     def build(
         requirement_text: str,
