@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 实施计划
 
-> 版本 v1.1 | 更新 2026-06-30 | 全功能交付 + 生成任务可重连
+> 版本 v1.2 | 更新 2026-07-01 | 需求补全 + 并行生成 + 多人隔离
 
 ## 当前状态
 - **架构变更**: Project/Module → KnowledgeBase（知识库为核心，卡片式管理）
@@ -9,15 +9,21 @@
 - **用例格式**: 对齐用户模板（标题【模块-功能】、等级P0-P2、步骤字符串）
 
 ## 已完成功能清单
-| 模块 | 功能 | 状态 |
-|------|------|------|
-| 知识库 | 创建/删除知识库，7种知识类型管理，Excel批量导入 | ✓ |
-| 用例生成 | PRD上传解析 + 文本输入，知识库选择，AI生成+自我修正 | ✓ |
-| 审核标注 | 按批次分组，逐条通过/拒绝，幻觉归因(5种)，Tab筛选 | ✓ |
-| 统计分析 | 用例数/可用率/幻觉分布/批次统计，看板 | ✓ |
-| 检索 | 中文n-gram关键词 + ChromaDB向量混合检索 | ✓ |
-| 导出 | Excel下载(5列对齐用户模板)，按批次/按结果导出 | ✓ |
-| 生成任务 | 后台任务(asyncio)+独立DB会话，SSE事件缓存重放，刷新/切页后断点续看，全局页头「生成中」入口 | ✓ |
+| 模块           | 功能                                                                                       | 状态 |
+| -------------- | ------------------------------------------------------------------------------------------ | ---- |
+| 知识库         | 创建/删除知识库，7种知识类型管理，Excel批量导入                                            | ✓    |
+| 用例生成       | PRD上传解析 + 文本输入，知识库选择，AI生成+评审补充                                        | ✓    |
+| 审核标注       | 按批次分组，逐条通过/拒绝，幻觉归因(5种)，Tab筛选                                          | ✓    |
+| 统计分析       | 用例数/可用率/幻觉分布/批次统计，看板                                                      | ✓    |
+| 检索           | 中文n-gram关键词 + ChromaDB向量混合检索                                                    | ✓    |
+| 导出           | Excel下载(5列对齐用户模板)，按批次/按结果导出                                              | ✓    |
+| 生成任务       | 后台任务(asyncio)+独立DB会话，SSE事件缓存重放，刷新/切页后断点续看，全局页头「生成中」入口 | ✓    |
+| 评审-删除-补充 | 生成后 LLM 以测试专家身份逐条判定保留/删除，定向补充缺口，不再整批改写                     | ✓    |
+| 并行生成       | store 改为多任务 Map，可同时发起多个生成互不阻塞；前端任务列表可切换查看                   | ✓    |
+| 多人隔离       | localStorage 匿名 client_id，后端 owner_id 过滤 active 任务，不同浏览器互不干扰            | ✓    |
+| 需求补全       | POST /generate/clarify，LLM 结合知识库补全简略需求为结构化 Markdown，可编辑确认            | ✓    |
+| 429 处理       | 限额/限流不重试直接报错，5xx 服务端抖动保留指数退避重试                                    | ✓    |
+| 死代码清理     | 删除无人调用的 POST /generate、/generate/stream、GenerateResponse 及相关非流式函数         | ✓    |
 
 ## Context
 
@@ -29,18 +35,18 @@
 
 ## 技术栈定案
 
-| 层 | 选型 | 
-|---|---|
-| 前端 | Vue 3 Composition API + `<script setup>` + Element Plus + Pinia + Vue Router + TypeScript |
-| 构建 | Vite |
-| 后端 | Python 3.10+ + FastAPI (async) |
-| 数据库 | SQLite (dev) → PostgreSQL (prod) |
-| 向量库 | ChromaDB 1.5.x（持久化 PersistentClient） |
-| LLM | LLM API (OpenAI 兼容 /v1/chat/completions) |
-| Embedding | Embedding API (OpenAI 兼容) (可切换 sentence-transformers 本地模式) |
-| PRD解析 | pdfplumber + python-docx |
-| Excel处理 | openpyxl |
-| 部署 | Docker + docker-compose |
+| 层        | 选型                                                                                      |
+| --------- | ----------------------------------------------------------------------------------------- |
+| 前端      | Vue 3 Composition API + `<script setup>` + Element Plus + Pinia + Vue Router + TypeScript |
+| 构建      | Vite                                                                                      |
+| 后端      | Python 3.10+ + FastAPI (async)                                                            |
+| 数据库    | SQLite (dev) → PostgreSQL (prod)                                                          |
+| 向量库    | ChromaDB 1.5.x（持久化 PersistentClient）                                                 |
+| LLM       | LLM API (OpenAI 兼容 /v1/chat/completions)                                                |
+| Embedding | Embedding API (OpenAI 兼容) (可切换 sentence-transformers 本地模式)                       |
+| PRD解析   | pdfplumber + python-docx                                                                  |
+| Excel处理 | openpyxl                                                                                  |
+| 部署      | Docker + docker-compose                                                                   |
 
 ---
 
@@ -101,10 +107,9 @@
 
 #### 生成
 - `POST /parse-prd` — 上传解析 PRD 文件
-- `POST /generate` — 非流式生成并落库
-- `POST /generate/stream` — SSE 流式生成（请求内直连，随请求结束而中断）
-- `POST /generate/async` — 启动后台生成任务，立即返回 `{task_id, title, status, created_at}`；任务脱离请求运行，刷新/切走后仍继续
-- `GET /generate/active` — 列出仍在运行的生成任务，供刷新后「继续查看」
+- `POST /generate/clarify` — 基于知识库补全需求，返回结构化完整需求（Markdown），供用户确认/编辑后再生成
+- `POST /generate/async` — 启动后台生成任务，立即返回 `{task_id, title, status, owner_id, created_at}`；任务脱离请求运行，刷新/切走后仍继续。请求体 `client_id` 作为归属者，实现多人/多浏览器隔离
+- `GET /generate/active?client_id=` — 列出本客户端仍在运行的生成任务，供刷新后「继续查看」
 - `GET /generate/stream/{task_id}` — 订阅指定任务的 SSE：先重放已缓存事件，再推送实时事件（支持断线重连续看）
 
 #### 审核
@@ -127,13 +132,15 @@
 ## SSE 流式生成协议
 
 ```
-event: progress  → {stage: "retrieving"|"constructing"|"generating"|"validating"|"correcting", message: "..."}
+event: progress  → {stage: "retrieving"|"constructing"|"generating"|"validating"|"reviewing"|"supplementing", message: "..."}
 event: chunk     → {text: "(LLM 增量输出)"}
 event: complete  → {cases: [...], knowledge_used: {...}, knowledge_matches: {...}, validation_warnings: [...]}
 event: error     → {message: "..."}
 ```
 
-**后台任务模式（`/generate/async` + `/generate/stream/{task_id}`）**：事件由后台任务产生并缓存在内存中。客户端订阅时，先按序重放已缓存事件实现「断点续看」，再续接实时事件；任务结束后服务端关闭流。前端在应用加载时通过 `/generate/active` 发现运行中的任务并自动重连。
+**需求补全（`POST /generate/clarify`）**：非流式，返回 `{clarified_text}`（Markdown）。检索 + 补全一步完成，不经过后台任务。
+
+**后台任务模式（`POST /generate/async` + `GET /generate/stream/{task_id}`）**：事件由后台任务产生并缓存在内存中。客户端订阅时，先按序重放已缓存事件实现「断点续看」，再续接实时事件；任务结束后服务端关闭流。
 
 ---
 
@@ -225,12 +232,12 @@ event: error     → {message: "..."}
 
 ## 风险应对
 
-| 风险 | 应对 |
-|---|---|
-| 知识库冷启动 | 允许仅含字段字典即可生成，展示警告提示质量预期 |
-| LLM返回非JSON | regex fallback从markdown代码块提取; 失败则重试 |
-| 大PRD超上下文 | 按Markdown标题分章节生成，聚合结果 |
-| ChromaDB持久化问题 | Docker volume挂载; 提供备份/恢复接口 |
+| 风险               | 应对                                           |
+| ------------------ | ---------------------------------------------- |
+| 知识库冷启动       | 允许仅含字段字典即可生成，展示警告提示质量预期 |
+| LLM返回非JSON      | regex fallback从markdown代码块提取; 失败则重试 |
+| 大PRD超上下文      | 按Markdown标题分章节生成，聚合结果             |
+| ChromaDB持久化问题 | Docker volume挂载; 提供备份/恢复接口           |
 
 ---
 
