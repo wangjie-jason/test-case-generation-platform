@@ -4,14 +4,14 @@
 
 ## 技术栈
 
-| 层 | 技术 |
-|---|---|
-| 前端 | Vue 3 + Element Plus + Pinia + TypeScript |
-| 后端 | Python 3.10+ + FastAPI (async) |
-| 数据库 | SQLite (dev) |
-| 向量库 | ChromaDB |
-| LLM | 任意 OpenAI 兼容 API（DeepSeek / 智谱 GLM / OpenAI 等） |
-| 文档解析 | pdfplumber + python-docx |
+| 层       | 技术                                                    |
+| -------- | ------------------------------------------------------- |
+| 前端     | Vue 3 + Element Plus + Pinia + TypeScript               |
+| 后端     | Python 3.10+ + FastAPI (async)                          |
+| 数据库   | SQLite (dev)                                            |
+| 向量库   | ChromaDB                                                |
+| LLM      | 任意 OpenAI 兼容 API（DeepSeek / 智谱 GLM / OpenAI 等） |
+| 文档解析 | pdfplumber + python-docx                                |
 
 ## 快速开始
 
@@ -81,8 +81,10 @@ docker-compose up
 ### 用例生成
 - 粘贴文本 / 上传 PRD（PDF/Word/MD/TXT）
 - 选择知识库限定检索范围
+- **需求补全**（可选）：需求描述简略时，先用知识库把缺失逻辑（字段约束/业务规则/状态流转/异常边界/回归风险）补成结构化完整需求，可编辑确认后再生成，减少用例遗漏
 - 六大测试技术：等价类、边界值、决策表、状态迁移、错误推测、组合测试
-- 生成后自我修正（校验字段/规则合法性）
+- 生成后由 AI 以测试专家身份**评审**：删掉有问题的用例、针对缺口补充新用例（保留合格用例不改写）
+- **并行生成**：可同时发起多个生成任务、互不阻塞；切换页面/刷新后自动重连续看进度；多人各自浏览器任务隔离
 - 下载 Excel（用例标题 / 等级 / 前置条件 / 步骤 / 预期结果）
 
 ### 审核标注
