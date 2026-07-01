@@ -96,6 +96,10 @@ async function consumeSse(
 }
 
 export const generationApi = {
+  // 基于知识库补全需求，返回结构化完整需求（Markdown），供用户确认/编辑后再生成。
+  clarify(data: GenerateRequest) {
+    return client.post<any, { clarified_text: string }>('/generate/clarify', data)
+  },
   // 启动后台生成任务，立即返回 task_id；任务脱离请求，刷新/切走后仍继续。
   startTask(data: GenerateRequest) {
     return client.post<any, GenerationTaskSummary>('/generate/async', { ...data, client_id: getClientId() })

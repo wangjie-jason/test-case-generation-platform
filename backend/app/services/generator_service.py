@@ -18,6 +18,20 @@ logger = logging.getLogger(__name__)
 class GeneratorService:
 
     @staticmethod
+    async def clarify(db: AsyncSession, requirement_text: str, kb_ids: list[str] | None = None) -> str:
+        """基于知识库补全（澄清）需求：检索 → LLM 补全 → 返回 Markdown 文本。
+        不生成测试用例，只产出结构化的完整需求说明。"""
+        retrieval = await RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)
+        historical_cases = await _get_historical_cases(requirement_text, retrieval["query_keywords"], kb_ids)
+        system_content, user_content = PromptService.build_clarify(
+            requirement_text=requirement_text, field_dicts=retrieval["field_dicts"],
+            business_rules=retrieval["business_rules"], state_machines=retrieval["state_machines"],
+            term_mappings=retrieval["term_mappings"], defect_chunks=retrieval.get("defect_chunks"),
+            prd_chunks=retrieval.get("prd_chunks"), historical_cases=historical_cases,
+        )
+        return await LLMService().generate(system_content, user_content)
+
+    @staticmethod
     async def generate_stream(db: AsyncSession, requirement_text: str, kb_ids: list[str] | None = None) -> AsyncGenerator[dict, None]:
         yield {"type": "progress", "stage": "retrieving", "message": "正在检索知识库..."}
         retrieval = await RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)

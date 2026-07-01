@@ -12,6 +12,7 @@ const {
   kbs, selectedKbs, requirementText, batchName, inputMode, isParsing, parsedFilename,
   tabActive, isGenerating, cases, genProgress, streamText, knowledgeCounts,
   knowledgeMatches, history, taskList, activeTaskId, runningCount,
+  clarifiedText, isClarifying,
 } = storeToRefs(store)
 
 onMounted(() => { store.fetchKbs(); store.fetchHistory() })
@@ -22,6 +23,10 @@ function handlePrdUpload(options: any) {
 
 function handleGenerate() {
   return store.generate()
+}
+
+function handleClarify() {
+  return store.clarify()
 }
 
 async function downloadCases() {
@@ -146,8 +151,28 @@ async function downloadBatch(batch: { req_text?: string | null; created_at?: str
                 <el-option v-for="k in kbs" :key="k.id" :label="k.name" :value="k.id" />
               </el-select>
             </div>
+            <el-button
+              :loading="isClarifying"
+              @click="handleClarify"
+              style="margin-top:12px;width:100%"
+            >
+              {{ isClarifying ? '正在补全需求...' : '① 用知识库补全需求（可选）' }}
+            </el-button>
+            <div v-if="clarifiedText" class="clarify-box">
+              <div class="clarify-hint">
+                已根据知识库补全下方需求，可直接修改。生成时将<strong>以此为准</strong>（留空则用上方原始需求）。
+              </div>
+              <el-input
+                v-model="clarifiedText"
+                type="textarea"
+                :autosize="{ minRows: 6, maxRows: 16 }"
+                placeholder="补全后的结构化需求"
+              />
+              <el-button link type="info" size="small" @click="clarifiedText = ''">清除补全，改用原始需求</el-button>
+            </div>
+
             <el-button type="primary" size="large" @click="handleGenerate" style="margin-top:12px;width:100%">
-              {{ runningCount > 0 ? `生成测试用例（另起一个，当前 ${runningCount} 个进行中）` : '生成测试用例' }}
+              {{ runningCount > 0 ? `② 生成测试用例（另起一个，当前 ${runningCount} 个进行中）` : (clarifiedText ? '② 按补全需求生成测试用例' : '生成测试用例') }}
             </el-button>
 
             <!-- 并行任务列表：可同时进行多个生成，点击查看各自进度/结果 -->
@@ -273,6 +298,8 @@ async function downloadBatch(batch: { req_text?: string | null; created_at?: str
 .history-tab { max-width: 960px; margin: 0 auto; }
 .task-list { margin-top: 14px; border-top: 1px solid #ebeef5; padding-top: 10px; }
 .task-list-title { font-size: 12px; color: #909399; margin-bottom: 6px; }
+.clarify-box { margin-top: 10px; padding: 10px; border: 1px solid #d9ecff; border-radius: 8px; background: #f5faff; }
+.clarify-hint { font-size: 12px; color: #606266; line-height: 1.5; margin-bottom: 8px; }
 .task-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .task-item:hover { background: #f5f7fa; }
 .task-item.active { background: #ecf5ff; }

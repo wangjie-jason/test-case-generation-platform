@@ -9,12 +9,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.test_case import TestCase
 from app.schemas.generation import GenerateRequest
+from app.services.generator_service import GeneratorService
+from app.services.llm_service import LLMServiceError
 from app.services.parser_service import ParserService
 from app.services.task_service import TaskManager
 
 router = APIRouter()
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+@router.post("/generate/clarify")
+async def generate_clarify(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
+    """基于知识库补全需求：返回结构化的完整需求说明（Markdown），供用户确认/编辑后再生成用例。"""
+    try:
+        clarified = await GeneratorService.clarify(db, body.requirement_text, kb_ids=body.kb_ids if body.kb_ids else None)
+    except LLMServiceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"clarified_text": clarified}
 
 
 @router.post("/generate/async")
