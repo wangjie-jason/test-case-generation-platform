@@ -278,6 +278,8 @@ async function downloadBatch(batch: { req_text?: string | null; created_at?: str
 .gen-container { display: flex; flex-direction: column; gap: 24px; }
 .top-panels { display: flex; gap: 24px; align-items: stretch; }
 .input-panel { flex: 0 0 420px; }
+/* 撑满宽度的相邻按钮之间，去掉 Element Plus 默认的 margin-left，避免整行按钮被右推、看起来不居中 */
+.input-panel :deep(.el-button + .el-button) { margin-left: 0; }
 .input-panel > :deep(.el-card), .knowledge-panel > :deep(.el-card) { height: 100%; }
 .knowledge-panel { flex: 1; min-width: 0; }
 .output-panel { width: 100%; }
