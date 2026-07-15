@@ -39,6 +39,11 @@ class GeneratorService:
         kc = {"field_dicts_count": len(retrieval["field_dicts"]), "business_rules_count": len(retrieval["business_rules"]), "state_machines_count": len(retrieval["state_machines"]), "term_mappings_count": len(retrieval["term_mappings"]), "prd_chunks_count": len(retrieval.get("prd_chunks", [])), "defect_chunks_count": len(retrieval.get("defect_chunks", [])), "historical_cases_count": len(historical_cases)}
         yield {"type": "progress", "stage": "constructing", "message": f"检索到 {sum(kc.values())} 条相关知识"}
 
+        # 检索一结束就把命中的知识明细推给前端，避免等到 complete 才显示（生成/评审/补充耗时较长）。
+        # complete 事件里同样带这两个字段，作为断线重连时的兜底，前端幂等赋值。
+        km = _knowledge_matches(retrieval, historical_cases)
+        yield {"type": "knowledge", "knowledge_used": kc, "knowledge_matches": km}
+
         system_content, user_content = PromptService.build(requirement_text=requirement_text, field_dicts=retrieval["field_dicts"], business_rules=retrieval["business_rules"], state_machines=retrieval["state_machines"], term_mappings=retrieval["term_mappings"], defect_chunks=retrieval.get("defect_chunks"), prd_chunks=retrieval.get("prd_chunks"), historical_cases=historical_cases)
 
         yield {"type": "progress", "stage": "generating", "message": "AI正在生成..."}
@@ -76,7 +81,7 @@ class GeneratorService:
                     yield {"type": "progress", "stage": "supplementing", "message": f"补充 {len(supplements)} 条用例，共 {len(cases)} 条"}
             warnings = await ValidationService.validate_cases(db, cases)
 
-        yield {"type": "complete", "cases": cases, "knowledge_used": kc, "knowledge_matches": _knowledge_matches(retrieval, historical_cases), "validation_warnings": warnings}
+        yield {"type": "complete", "cases": cases, "knowledge_used": kc, "knowledge_matches": km, "validation_warnings": warnings}
 
 
 def _knowledge_matches(retrieval: dict, historical_cases: list[dict]) -> dict[str, list[dict]]:

@@ -112,8 +112,13 @@ export const useGenerationStore = defineStore('generation', () => {
       if (event.stage === 'supplementing') t.streamText = ''
     } else if (event.type === 'chunk') {
       t.streamText += event.text
+    } else if (event.type === 'knowledge') {
+      // 检索一结束就展示命中的知识，不用等 complete。
+      t.knowledgeCounts = event.knowledge_used || {}
+      t.knowledgeMatches = event.knowledge_matches || {}
     } else if (event.type === 'complete') {
       t.cases = event.cases || []
+      // 重复赋值以兜底断线重连：complete 单独订阅时也能拿到知识信息。
       t.knowledgeCounts = event.knowledge_used || {}
       t.knowledgeMatches = event.knowledge_matches || {}
       t.validationWarnings = (event.validation_warnings as any[]) || []

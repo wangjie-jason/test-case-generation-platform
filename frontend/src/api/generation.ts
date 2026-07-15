@@ -30,6 +30,13 @@ export type GenerateStreamEvent =
   | { type: 'progress'; stage: string; message: string }
   | { type: 'chunk'; text: string }
   | {
+      // 检索完成后立即推送，让前端在等生成时就能显示命中的知识。
+      // complete 事件里也会带同样两个字段，用于重连兜底。
+      type: 'knowledge'
+      knowledge_used: Record<string, number>
+      knowledge_matches: KnowledgeMatches
+    }
+  | {
       type: 'complete'
       cases: GeneratedTestCase[]
       knowledge_used: Record<string, number>
