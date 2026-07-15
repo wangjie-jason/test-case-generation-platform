@@ -205,7 +205,7 @@ async function downloadBatch(batch: { req_text?: string | null; created_at?: str
                 <el-tag v-if="kSummary !== '无'" size="small" type="warning">{{ kSummary }}</el-tag>
               </div>
             </template>
-            <el-alert v-if="isGenerating" :title="genProgress || '正在检索知识库并生成用例...'" type="info" :closable="false" />
+            <el-alert v-if="isGenerating && !hasKnowledgeMatches" :title="genProgress || '正在检索知识库并生成用例...'" type="info" :closable="false" />
             <template v-else-if="hasKnowledgeMatches">
               <div v-for="group in matchGroups" :key="group.key" class="match-group">
                 <div class="match-group-title">
@@ -230,7 +230,7 @@ async function downloadBatch(batch: { req_text?: string | null; created_at?: str
           </template>
           <el-alert v-if="isGenerating" :title="genProgress || '生成中...'" type="info" :closable="false" />
           <div v-if="isGenerating && streamText" class="stream-output">{{ streamText }}</div>
-          <el-tag v-if="!isGenerating && cases.length" size="small" type="info" style="margin-bottom:8px">引用知识：{{ kSummary }}</el-tag>
+          <el-tag v-if="kSummary !== '无'" size="small" type="info" style="margin-bottom:8px">引用知识：{{ kSummary }}</el-tag>
           <div v-for="(c, idx) in cases" :key="idx" style="margin-bottom:8px">
             <el-collapse>
               <el-collapse-item>

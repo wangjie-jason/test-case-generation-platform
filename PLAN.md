@@ -134,6 +134,7 @@
 ```
 event: progress  → {stage: "retrieving"|"constructing"|"generating"|"validating"|"reviewing"|"supplementing", message: "..."}
 event: chunk     → {text: "(LLM 增量输出)"}
+event: knowledge → {knowledge_used: {...}, knowledge_matches: {...}}    # 检索结束后立即推送，让前端不等生成完成也能显示命中知识
 event: complete  → {cases: [...], knowledge_used: {...}, knowledge_matches: {...}, validation_warnings: [...]}
 event: error     → {message: "..."}
 ```
