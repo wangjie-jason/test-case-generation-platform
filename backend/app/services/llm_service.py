@@ -66,7 +66,7 @@ class LLMService:
         """同步生成，非流式返回。"""
         messages = self._build_messages(system_content, user_content)
 
-        # 推理类模型（如 GLM-4.5）会先输出较长的 reasoning_content，再生成正文，
+        # 推理类模型（如 GLM-4.5、GLM-4.7-Flash）会先输出较长的 reasoning_content，再生成正文，
         # 总耗时可能很长。连接超时保持短，读超时拉长到 300s 以避免 ReadTimeout。
         timeout = httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=15.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
