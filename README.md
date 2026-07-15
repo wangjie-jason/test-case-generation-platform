@@ -45,7 +45,7 @@ cp backend/.env.example backend/.env
 ```ini
 LLM_API_KEY=your-key-here
 LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4/
-LLM_MODEL=glm-4-flash
+LLM_MODEL=glm-4.7-flash
 ```
 
 ### 4. 安装前端依赖

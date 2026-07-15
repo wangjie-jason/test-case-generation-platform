@@ -20,11 +20,15 @@ interface TaskState {
 }
 
 function newTaskState(taskId: string, title: string): TaskState {
-  return {
+  // 必须 reactive()：任务对象通过 _consume 的闭包传给 _handleEvent，
+  // 后者在 SSE 事件中直接 `t.xxx = ...` 更新字段。若返回普通对象，
+  // 即使塞进 reactive Map，闭包持有的仍是原始引用，属性赋值不会触发视图更新——
+  // 表现就是进度条永远停在「正在准备」、流式文本不刷新。
+  return reactive({
     taskId, title, status: 'running',
     genProgress: '正在准备...', streamText: '',
     cases: [], knowledgeCounts: {}, knowledgeMatches: {}, validationWarnings: [],
-  }
+  }) as TaskState
 }
 
 export const useGenerationStore = defineStore('generation', () => {
