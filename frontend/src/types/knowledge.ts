@@ -18,7 +18,10 @@ export interface TermMapping {
 }
 export interface PrdDocument {
   id: string; kb_id: string; filename: string; file_format: string
-  raw_text: string; chunk_count: number; created_at: string
+  raw_text: string; chunk_count: number
+  source_type?: 'upload' | 'feishu'
+  source_ref?: string | null
+  created_at: string
 }
 export interface DefectRecord {
   id: string; kb_id: string; title: string; severity: 'critical' | 'major' | 'minor' | 'trivial'

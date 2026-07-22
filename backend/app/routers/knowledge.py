@@ -11,6 +11,7 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.parser_service import ParserService
 from app.services.excel_service import ExcelImportService
 from app.services.indexing_service import IndexingService, PRD_COLLECTION, DEFECT_COLLECTION
+from app.services.feishu_service import FeishuImportError, import_from_url as feishu_import_from_url
 
 router = APIRouter()
 _kb = KnowledgeService()
@@ -88,6 +89,26 @@ async def upload_prd(kb_id: str, file: UploadFile = File(...), db: AsyncSession 
     content = await file.read()
     raw_text = await ParserService.parse(file.filename or "未命名", content)
     doc = await _kb.create_prd_document(db, kb_id, file.filename or "未命名", ext, raw_text)
+    await IndexingService.index_prd(doc)
+    return doc
+
+
+@router.post("/knowledge-bases/{kb_id}/prd-documents/from-feishu", response_model=PrdDocumentResponse, status_code=201)
+async def import_prd_from_feishu(kb_id: str, req: FeishuImportRequest, db: AsyncSession = Depends(get_db)):
+    """从飞书文档 / Wiki 节点导入 PRD。按 obj_token 去重，重复导入覆盖原记录并重建向量索引。"""
+    kb = await db.get(KnowledgeBase, kb_id)
+    if not kb: raise HTTPException(404, "知识库不存在")
+    try:
+        result = await feishu_import_from_url(req.url)
+    except FeishuImportError as e:
+        raise HTTPException(400, str(e))
+    if not result.content.strip():
+        raise HTTPException(400, "飞书文档内容为空，无法导入")
+    # 用飞书返回的 title 作为文件名，加后缀便于列表识别来源。
+    filename = f"{result.title}.{result.file_format}"
+    doc, _created = await _kb.upsert_feishu_prd_document(
+        db, kb_id, filename, result.file_format, result.content, result.obj_token,
+    )
     await IndexingService.index_prd(doc)
     return doc
 
