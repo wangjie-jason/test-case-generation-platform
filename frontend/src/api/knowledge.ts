@@ -48,6 +48,9 @@ export const prdDocumentApi = {
       onUploadProgress: (e: any) => { if (e.total && onProgress) onProgress(Math.round((e.loaded * 100) / e.total)) },
     })
   },
+  importFromFeishu(kbId: string, url: string) {
+    return client.post<any, PrdDocument>(`/knowledge-bases/${kbId}/prd-documents/from-feishu`, { url })
+  },
   delete(kbId: string, id: string) { return client.delete(`/knowledge-bases/${kbId}/prd-documents/${id}`) },
 }
 

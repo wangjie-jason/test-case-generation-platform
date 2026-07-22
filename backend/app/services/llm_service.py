@@ -55,6 +55,22 @@ class LLMService:
         self.model = settings.LLM_MODEL
         self.temperature = settings.LLM_TEMPERATURE
         self.max_tokens = settings.LLM_MAX_TOKENS
+        self.reasoning_effort = settings.LLM_REASONING_EFFORT.strip() or None
+
+    def _build_payload(self, messages: list[dict], stream: bool = False) -> dict:
+        """构造 chat/completions 请求体；仅当配置了推理强度时才带 reasoning_effort。"""
+        payload: dict = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        if stream:
+            payload["stream"] = True
+        if self.reasoning_effort:
+            # OpenAI 兼容协议下的思考强度字段。不支持的服务商会自动忽略，安全。
+            payload["reasoning_effort"] = self.reasoning_effort
+        return payload
 
     def _build_messages(self, system_content: str, user_content: str) -> list[dict]:
         return [
@@ -78,12 +94,7 @@ class LLMService:
                             "Authorization": f"Bearer {self.api_key}",
                             "Content-Type": "application/json",
                         },
-                        json={
-                            "model": self.model,
-                            "messages": messages,
-                            "temperature": self.temperature,
-                            "max_tokens": self.max_tokens,
-                        },
+                        json=self._build_payload(messages, stream=False),
                     )
                 except httpx.TimeoutException as exc:
                     raise LLMServiceError("模型响应超时，请稍后重试或缩短需求描述") from exc
@@ -130,13 +141,7 @@ class LLMService:
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "model": self.model,
-                        "messages": messages,
-                        "temperature": self.temperature,
-                        "max_tokens": self.max_tokens,
-                        "stream": True,
-                    },
+                    json=self._build_payload(messages, stream=True),
                 ) as response:
                     # 限流/暂时不可用：读掉响应体释放连接后指数退避重试。
                     if response.status_code in _RETRY_STATUS and attempt < _MAX_RETRIES:

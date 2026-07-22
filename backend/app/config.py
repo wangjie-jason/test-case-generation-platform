@@ -19,11 +19,21 @@ class Settings(BaseSettings):
 
     LLM_TEMPERATURE: float = 0.3
     LLM_MAX_TOKENS: int = 8192
+    # 推理强度（OpenAI 兼容协议下的 reasoning_effort 字段）。
+    #   ""      = 不带该字段（默认，兼容所有 OpenAI-compat 模型）
+    #   "low" / "medium" / "high" / "max" = 让支持的模型走对应思考强度
+    # 目前主要影响 DeepSeek V4 Pro/Flash 等具备"Think"模式的模型；不识别该字段的服务商会忽略。
+    LLM_REASONING_EFFORT: str = ""
 
     # 向量检索阈值（L2 距离）：最小结果超过此值视为"完全不相关"，整批过滤。
     VECTOR_MIN_DISTANCE_THRESHOLD: float = 12.0
     # 在"有相关性"的前提下，保留距离不超过「最小距离 + 此增量」的结果。
     VECTOR_DISTANCE_DELTA: float = 4.0
+
+    # 飞书开放平台自建应用凭证。空值表示未配置，接入接口会直接报错。
+    FEISHU_APP_ID: str = ""
+    FEISHU_APP_SECRET: str = ""
+    FEISHU_OPEN_API_BASE: str = "https://open.feishu.cn/open-apis"
 
     model_config = {"env_file": str(_ENV_PATH), "env_file_encoding": "utf-8"}
 

@@ -52,6 +52,7 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
     updateTermMapping: (kbId: string, id: string, d: Partial<TermMapping>) => termMappingApi.update(kbId, id, d).then(() => _fetch(kbId)),
     deleteTermMapping: (kbId: string, id: string) => termMappingApi.delete(kbId, id).then(() => _fetch(kbId)),
     uploadPrd: (kbId: string, file: File, onProgress?: (pct: number) => void) => prdDocumentApi.upload(kbId, file, onProgress).then(() => _fetch(kbId)),
+    importPrdFromFeishu: (kbId: string, url: string) => prdDocumentApi.importFromFeishu(kbId, url).then(() => _fetch(kbId)),
     deletePrd: (kbId: string, id: string) => prdDocumentApi.delete(kbId, id).then(() => { prdDocuments.value = prdDocuments.value.filter(d => d.id !== id) }),
     createDefect: (kbId: string, d: Partial<DefectRecord>) => defectRecordApi.create(kbId, d).then(() => _fetch(kbId)),
     updateDefect: (kbId: string, id: string, d: Partial<DefectRecord>) => defectRecordApi.update(kbId, id, d).then(() => _fetch(kbId)),

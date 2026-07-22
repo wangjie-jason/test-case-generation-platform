@@ -31,3 +31,17 @@ async def get_db():
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # 轻量迁移：给旧库的 prd_documents 补上飞书来源字段。SQLite 的 ALTER TABLE 加列是幂等安全的，
+        # 但重复执行会报错，所以先查 pragma。项目没接 Alembic，先用这种手工方式撑住。
+        await conn.run_sync(_migrate_prd_document_source_columns)
+
+
+def _migrate_prd_document_source_columns(sync_conn) -> None:
+    from sqlalchemy import text
+
+    cols = {row[1] for row in sync_conn.execute(text("PRAGMA table_info(prd_documents)"))}
+    if "source_type" not in cols:
+        sync_conn.execute(text("ALTER TABLE prd_documents ADD COLUMN source_type VARCHAR(20) NOT NULL DEFAULT 'upload'"))
+    if "source_ref" not in cols:
+        sync_conn.execute(text("ALTER TABLE prd_documents ADD COLUMN source_ref VARCHAR(100)"))
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS ix_prd_documents_source_ref ON prd_documents(source_ref)"))

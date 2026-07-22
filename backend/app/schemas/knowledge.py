@@ -132,9 +132,16 @@ class PrdDocumentResponse(BaseModel):
     file_format: str
     raw_text: str
     chunk_count: int
+    source_type: str = "upload"
+    source_ref: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class FeishuImportRequest(BaseModel):
+    """从飞书导入 PRD 的请求体。"""
+    url: str
 
 
 # ── 缺陷记录 ──
