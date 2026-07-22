@@ -138,7 +138,7 @@ def blocks_to_markdown(blocks: list[dict]) -> str:
     """把飞书 Docx block 树拼成 Markdown。
 
     支持：标题(3~11)、段落(2)、无序列表(12)、有序列表(13)、代码块(14)、引用(15)、待办(17)、
-    分割线(22)、表格(31)+表格单元格(32)。表格转成 GFM，合并单元格用文本兜底。
+    分割线(22)、表格(31)+表格单元格(32)、图片(27，占位符不下载)。表格转成 GFM，合并单元格用文本兜底。
     未识别的 block_type 记 debug 日志后跳过，防止一处不认识就整篇报错。
     """
     by_id = {b["block_id"]: b for b in blocks}
@@ -219,6 +219,13 @@ def blocks_to_markdown(blocks: list[dict]) -> str:
         if t == 32:
             # 表格单元格：正常情况下由父表格控制渲染，兜底返回空避免"孤儿"复制内容。
             return ""
+        if t == 27:
+            # 图片：不下载、不做多模态识别；若有 caption 则展示，否则用统一占位符。
+            # 这样 raw_text 里能看出这里有一张图，RAG 检索时又不至于被大段无意义内容干扰。
+            img = b.get("image") or {}
+            caption_elements = img.get("image_caption") or img.get("caption") or []
+            caption_text = render_text_elements(caption_elements).strip()
+            return f"[图片：{caption_text}]" if caption_text else "[图片]"
         logger.debug("未识别的飞书 block_type=%s，跳过自身内容仅递归子块", t)
         return "\n\n".join(render_recursive(c) for c in children_of.get(b["block_id"], []))
 
