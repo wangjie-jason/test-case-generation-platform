@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -23,6 +24,27 @@ import httpx
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# 与 llm_service 保持一致：若环境里配了 SOCKS/HTTP 代理（比如本机跑了 Clash），
+# httpx 会尝试走代理，SOCKS 还得装 httpx[socks]。飞书开放平台是公网直连的，
+# 这里在构造 client 时显式禁用代理，避免 ImportError 和不必要的代理绕行。
+_PROXY_ENV_VARS = (
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "all_proxy",
+)
+
+
+def _new_httpx_client(timeout: float = 30.0) -> httpx.AsyncClient:
+    """构造一个绕开系统代理变量的 httpx 客户端。"""
+    saved = {k: os.environ.pop(k, None) for k in _PROXY_ENV_VARS}
+    try:
+        # trust_env=False 让 httpx 不读 *_PROXY 环境变量；再叠加临时 pop 双重保险。
+        return httpx.AsyncClient(timeout=timeout, trust_env=False)
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
 
 
 class FeishuImportError(Exception):
@@ -82,7 +104,7 @@ class _FeishuClient:
         return self._token
 
     async def get(self, path: str, params: dict | None = None) -> dict:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with _new_httpx_client(timeout=30.0) as client:
             token = await self._get_token(client)
             r = await client.get(
                 f"{self.base}{path}", params=params, headers={"Authorization": f"Bearer {token}"}
