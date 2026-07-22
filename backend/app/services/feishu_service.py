@@ -286,6 +286,7 @@ def blocks_to_markdown(blocks: list[dict]) -> str:
             29: "[思维导图]",   # Mindnote
             30: "[电子表格]",   # 内嵌 Sheet
             18: "[多维表格]",   # 内嵌 Bitable
+            43: "[日历引用]",   # MentionCalendar — 内嵌日历事件/日程/日期
         }
         if t in _NON_TEXT_PLACEHOLDERS:
             return _NON_TEXT_PLACEHOLDERS[t]
