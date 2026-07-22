@@ -45,3 +45,6 @@ def _migrate_prd_document_source_columns(sync_conn) -> None:
     if "source_ref" not in cols:
         sync_conn.execute(text("ALTER TABLE prd_documents ADD COLUMN source_ref VARCHAR(100)"))
         sync_conn.execute(text("CREATE INDEX IF NOT EXISTS ix_prd_documents_source_ref ON prd_documents(source_ref)"))
+    if "image_tokens" not in cols:
+        # SQLite 没有原生 JSON 类型；SQLAlchemy 的 JSON 会退化成 TEXT，读写自动 json.loads/dumps。
+        sync_conn.execute(text("ALTER TABLE prd_documents ADD COLUMN image_tokens TEXT"))

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base, now_local
@@ -20,4 +20,7 @@ class PrdDocument(Base):
     source_type: Mapped[str] = mapped_column(String(20), default="upload", nullable=False)
     # 来源外键：对于飞书文档，存 obj_token（docx 的 document_id），用于去重与"覆盖"策略。
     source_ref: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    # 飞书 Docx 里出现过的图片 token 列表（顺序保留，去重）。目前只做占位符渲染，
+    # 保留这个字段是为了将来能扫库回填多模态描述，不必重新导入。
+    image_tokens: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_local)

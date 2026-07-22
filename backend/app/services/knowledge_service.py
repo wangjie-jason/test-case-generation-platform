@@ -114,10 +114,12 @@ class KnowledgeService:
     @staticmethod
     async def upsert_feishu_prd_document(
         db: AsyncSession, kb_id: str, filename: str, file_format: str, raw_text: str, obj_token: str,
+        image_tokens: list[str] | None = None,
     ) -> tuple[PrdDocument, bool]:
         """按 (kb_id, source_ref=obj_token) 去重：命中则覆盖内容，未命中则新建。
 
         返回 (记录, 是否新建)。覆盖时用于路由层决定要不要重新做向量索引 —— 目前都要重建。
+        image_tokens 是飞书 Docx 内出现过的图片 token 列表，仅存不用，为未来多模态回填保留。
         """
         r = await db.execute(
             select(PrdDocument).where(
@@ -131,10 +133,11 @@ class KnowledgeService:
             existing.filename = filename
             existing.file_format = file_format
             existing.raw_text = raw_text
+            existing.image_tokens = image_tokens or None
             await db.commit(); await db.refresh(existing); return existing, False
         item = PrdDocument(
             kb_id=kb_id, filename=filename, file_format=file_format, raw_text=raw_text,
-            source_type="feishu", source_ref=obj_token,
+            source_type="feishu", source_ref=obj_token, image_tokens=image_tokens or None,
         )
         db.add(item); await db.commit(); await db.refresh(item); return item, True
 
