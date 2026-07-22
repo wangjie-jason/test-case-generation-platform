@@ -275,8 +275,28 @@ def blocks_to_markdown(blocks: list[dict]) -> str:
             except Exception:
                 logger.exception("解析飞书图片 caption 失败，退化为 [图片]")
                 return "[图片]"
+        # 其他"非文本内容"类型的占位符：飞书文档里嵌的画板 / 附件 / 各种嵌入组件都没有可提取的
+        # 文本正文，静默丢掉会导致读者看不出"这里其实有内容"。给出明确占位符，方便读者感知，
+        # 也避免相邻段落被合并、错位。
+        _NON_TEXT_PLACEHOLDERS = {
+            21: "[画板]",       # Diagram / Board — 飞书自带画板画的架构图/流程图（本次触发的场景）
+            23: "[附件]",       # File — 拖进来的 PDF/图片/其它附件
+            26: "[嵌入内容]",   # Iframe — drawio / ProcessOn / 视频等
+            28: "[第三方组件]", # ISV — 企业微信 / SaaS 挂件
+            29: "[思维导图]",   # Mindnote
+            30: "[电子表格]",   # 内嵌 Sheet
+            18: "[多维表格]",   # 内嵌 Bitable
+        }
+        if t in _NON_TEXT_PLACEHOLDERS:
+            return _NON_TEXT_PLACEHOLDERS[t]
+        # 未识别的类型：如果它没有子块就输出通用占位符，方便读者一眼看到"这里被漏掉了"；
+        # 有子块则递归子块，兼容 callout / 分栏之类的容器 block（自身无正文、内容在子块里）。
+        children = children_of.get(b["block_id"], [])
+        if not children:
+            logger.debug("未识别的飞书 block_type=%s 且无子块，占位输出", t)
+            return f"[飞书内容 类型={t}]"
         logger.debug("未识别的飞书 block_type=%s，跳过自身内容仅递归子块", t)
-        return "\n\n".join(render_recursive(c) for c in children_of.get(b["block_id"], []))
+        return "\n\n".join(render_recursive(c) for c in children)
 
     if not root:
         candidates = [b for b in blocks if not b.get("parent_id")]
