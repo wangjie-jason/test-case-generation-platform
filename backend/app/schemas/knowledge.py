@@ -134,6 +134,7 @@ class PrdDocumentResponse(BaseModel):
     chunk_count: int
     source_type: str = "upload"
     source_ref: str | None = None
+    image_tokens: list[str] | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

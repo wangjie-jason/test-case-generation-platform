@@ -21,6 +21,7 @@ export interface PrdDocument {
   raw_text: string; chunk_count: number
   source_type?: 'upload' | 'feishu'
   source_ref?: string | null
+  image_tokens?: string[] | null
   created_at: string
 }
 export interface DefectRecord {

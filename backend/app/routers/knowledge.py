@@ -108,6 +108,7 @@ async def import_prd_from_feishu(kb_id: str, req: FeishuImportRequest, db: Async
     filename = f"{result.title}.{result.file_format}"
     doc, _created = await _kb.upsert_feishu_prd_document(
         db, kb_id, filename, result.file_format, result.content, result.obj_token,
+        image_tokens=result.image_tokens,
     )
     await IndexingService.index_prd(doc)
     return doc

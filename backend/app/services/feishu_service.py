@@ -266,6 +266,21 @@ class FeishuImportResult:
     file_format: str
     content: str
     obj_token: str
+    image_tokens: list[str]  # docx block_type=27 里的 image.token 列表，用于未来多模态回填
+
+
+def collect_image_tokens(blocks: list[dict]) -> list[str]:
+    """扫一遍 blocks，按文档顺序抽出所有图片 token。同一图片可能出现多次，去重保留首次顺序。"""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for b in blocks:
+        if b.get("block_type") != 27:
+            continue
+        token = (b.get("image") or {}).get("token")
+        if token and token not in seen:
+            seen.add(token)
+            ordered.append(token)
+    return ordered
 
 
 async def import_from_url(url: str) -> FeishuImportResult:
@@ -280,11 +295,13 @@ async def import_from_url(url: str) -> FeishuImportResult:
             return FeishuImportResult(
                 title=title or wiki_title, file_format="md",
                 content=blocks_to_markdown(blocks), obj_token=obj_token,
+                image_tokens=collect_image_tokens(blocks),
             )
         if obj_type == "doc":
             title, content = await fetch_legacy_doc(client, obj_token)
             return FeishuImportResult(
                 title=title or wiki_title, file_format="txt", content=content, obj_token=obj_token,
+                image_tokens=[],
             )
         raise FeishuImportError(
             f"该 Wiki 节点承载的是「{obj_type}」类型，当前仅支持 docx / 旧版 doc。"
@@ -295,12 +312,14 @@ async def import_from_url(url: str) -> FeishuImportResult:
         title, blocks = await fetch_docx_document(client, target.token)
         return FeishuImportResult(
             title=title, file_format="md", content=blocks_to_markdown(blocks), obj_token=target.token,
+            image_tokens=collect_image_tokens(blocks),
         )
 
     if target.kind == "doc":
         title, content = await fetch_legacy_doc(client, target.token)
         return FeishuImportResult(
             title=title, file_format="txt", content=content, obj_token=target.token,
+            image_tokens=[],
         )
 
     raise FeishuImportError(f"不支持的链接类型：{target.kind}")
