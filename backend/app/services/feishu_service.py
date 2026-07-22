@@ -174,12 +174,34 @@ def blocks_to_markdown(blocks: list[dict]) -> str:
         if b.get("block_type") == 1:
             root = b
 
-    def render_text_elements(elements: list[dict]) -> str:
+    def render_text_elements(elements) -> str:
+        """把飞书的 elements 数组拼成纯文本。
+
+        绝大多数 block 里 element 是 dict（含 text_run），但 image_caption 等字段实际返回
+        可能是纯字符串或 {"content": "..."} 之类的简化结构；对所有形态做兜底，避免整片文档炸掉。
+        """
+        if elements is None:
+            return ""
+        # 允许 caption 本身是一个字符串或数字。
+        if isinstance(elements, (str, int, float)):
+            return str(elements)
+        if not isinstance(elements, (list, tuple)):
+            return ""
         out = []
-        for el in elements or []:
+        for el in elements:
+            if isinstance(el, str):
+                out.append(el)
+                continue
+            if not isinstance(el, dict):
+                continue
             run = el.get("text_run")
-            if run:
+            if isinstance(run, dict):
                 out.append(run.get("content", ""))
+                continue
+            # 有些飞书 block 直接把文本挂在 element.content
+            content = el.get("content")
+            if isinstance(content, str):
+                out.append(content)
         return "".join(out)
 
     def render_block_content(b: dict) -> str:
@@ -243,11 +265,16 @@ def blocks_to_markdown(blocks: list[dict]) -> str:
             return ""
         if t == 27:
             # 图片：不下载、不做多模态识别；若有 caption 则展示，否则用统一占位符。
-            # 这样 raw_text 里能看出这里有一张图，RAG 检索时又不至于被大段无意义内容干扰。
-            img = b.get("image") or {}
-            caption_elements = img.get("image_caption") or img.get("caption") or []
-            caption_text = render_text_elements(caption_elements).strip()
-            return f"[图片：{caption_text}]" if caption_text else "[图片]"
+            # caption 数据结构在不同飞书版本里差异大（可能是 list[dict] / list[str] / str），
+            # render_text_elements 已做兼容；再兜底一次 try，避免个别异常图片炸整篇。
+            try:
+                img = b.get("image") or {}
+                caption_elements = img.get("image_caption") or img.get("caption") or []
+                caption_text = render_text_elements(caption_elements).strip()
+                return f"[图片：{caption_text}]" if caption_text else "[图片]"
+            except Exception:
+                logger.exception("解析飞书图片 caption 失败，退化为 [图片]")
+                return "[图片]"
         logger.debug("未识别的飞书 block_type=%s，跳过自身内容仅递归子块", t)
         return "\n\n".join(render_recursive(c) for c in children_of.get(b["block_id"], []))
 
