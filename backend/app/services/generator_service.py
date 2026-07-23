@@ -258,6 +258,12 @@ def _parse_json_object(raw: str) -> dict | None:
 
 
 def _parse_cases(raw: str) -> list[dict]:
+    # 空串 = 模型只吐了 reasoning_content 就结束（多为推理强度过高、思考爆了 max_tokens），
+    # 一个 JSON 起始符都没有则说明整段都是自然语言（拒答/思考流兜底）。这两种情况都不该
+    # 走后面的 JSON 分支——直接给用户可行动的提示，别再让人猜"格式错误"是啥意思。
+    if not raw or ("{" not in raw and "[" not in raw):
+        logger.warning("LLM 未产出结构化正文（len=%d），可能是推理强度过高或 max_tokens 不足", len(raw))
+        return [{"error": "模型只输出了思考过程未产出用例（建议调低 LLM_REASONING_EFFORT 或调大 LLM_MAX_TOKENS）"}]
     try:
         parsed = json.loads(raw)
         cases = _extract_cases(parsed)
@@ -283,6 +289,12 @@ def _parse_cases(raw: str) -> list[dict]:
     if salvaged:
         logger.warning("LLM 输出疑似被截断，抢救出 %s 条完整用例（考虑调大 LLM_MAX_TOKENS）", len(salvaged))
         return salvaged
+    # 所有路径都失败：把 raw 的规模与首尾片段打出来，区分空串 / 拒答文本 / 完全非 JSON 的失败模式。
+    # 之前只 debug 级别 log，等于什么线索都没有，复现一次要猜半天。
+    logger.warning(
+        "LLM 输出无法解析为用例数组（len=%d, head=%r, tail=%r）",
+        len(raw), raw[:200], raw[-200:] if len(raw) > 200 else "",
+    )
     return [{"error": "模型输出格式错误，请重试"}]
 
 
@@ -332,5 +344,7 @@ def _extract_cases(parsed) -> list[dict] | None:
     if isinstance(parsed, dict) and "cases" in parsed:
         parsed = parsed["cases"]
     if isinstance(parsed, list):
-        return [case for case in parsed if isinstance(case, dict)]
+        cases = [case for case in parsed if isinstance(case, dict)]
+        if cases and any("title" in c for c in cases):
+            return cases
     return None

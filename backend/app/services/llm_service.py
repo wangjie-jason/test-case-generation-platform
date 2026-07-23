@@ -45,6 +45,13 @@ class LLMServiceError(Exception):
     """模型服务调用失败时抛出，携带面向用户的中文提示。"""
 
 
+def _looks_like_structured_output(text: str) -> bool:
+    """判断一段文本是否值得当作模型的"结构化输出"喂给下游解析器。
+    只要包含 JSON 起始符（{ 或 [）就认为可能藏着可解析的用例。纯自然语言规划
+    （"1. 理解目标..."）不包含这两个符号，会被过滤掉。"""
+    return "{" in text or "[" in text
+
+
 class LLMService:
     """LLM API 封装，兼容 OpenAI 接口并支持流式输出。"""
 
@@ -153,6 +160,14 @@ class LLMService:
                         if response.status_code == 429:
                             raise LLMServiceError("模型调用受限（429）：可能是当前额度/配额已用尽或并发超限，请检查账户用量或更换模型")
                         raise LLMServiceError(f"模型服务返回错误 {response.status_code}")
+                    # 推理模型在流式下常常把正文放进 delta.reasoning_content，delta.content 全程为空。
+                    # 若整段流下来一个 content 都没有，把累积的 reasoning_content 作为兜底一次性 yield，
+                    # 与非流式 _extract_content 的 fallback 保持一致，避免上层拿到空串。
+                    # 但要收紧：只有 reasoning 里出现过 JSON 起始符时才 yield，否则说明模型全程都在
+                    # 输出自然语言规划（思考爆了 max_tokens，还没进入正文），这种情况把思考文本喂给
+                    # 用例解析器一定是垃圾进垃圾出，还不如让上层清晰地拿到空串，报"模型只思考未输出"。
+                    content_seen = False
+                    reasoning_buf = ""
                     async for line in response.aiter_lines():
                         if line.startswith("data: "):
                             chunk = line[6:]
@@ -163,7 +178,14 @@ class LLMService:
                                 delta = data["choices"][0].get("delta", {})
                                 content = delta.get("content", "")
                                 if content:
+                                    content_seen = True
                                     yield content
+                                    continue
+                                reasoning = delta.get("reasoning_content", "")
+                                if reasoning:
+                                    reasoning_buf += reasoning
                             except (json.JSONDecodeError, KeyError, IndexError):
                                 continue
+                    if not content_seen and reasoning_buf and _looks_like_structured_output(reasoning_buf):
+                        yield reasoning_buf
                     return
