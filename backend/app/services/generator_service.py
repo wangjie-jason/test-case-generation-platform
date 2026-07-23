@@ -277,7 +277,40 @@ def _parse_cases(raw: str) -> list[dict]:
     array_cases = _extract_first_array(raw)
     if array_cases is not None:
         return array_cases
+    # 前面三条路径都失败，通常是响应被 max_tokens 截断导致 JSON 未闭合。
+    # 用 raw_decode 逐个抓取已闭合的 case 对象，保住已经完整生成的部分，避免整批丢失。
+    salvaged = _salvage_truncated_cases(raw)
+    if salvaged:
+        logger.warning("LLM 输出疑似被截断，抢救出 %s 条完整用例（考虑调大 LLM_MAX_TOKENS）", len(salvaged))
+        return salvaged
     return [{"error": "模型输出格式错误，请重试"}]
+
+
+def _salvage_truncated_cases(raw: str) -> list[dict]:
+    """从残缺的 LLM 输出里逐个抓完整的 case 对象。
+
+    典型触发场景：LLM 已经吐了 N 条完整用例 + 半条不完整，然后被 max_tokens 截断，
+    整个数组/代码块都没闭合。这时 json.loads 整体解析必然失败，但每一条完整的
+    case 对象本身还是合法 JSON，json.JSONDecoder.raw_decode 可以从任意位置起解一个对象。
+
+    策略：把光标定位到第一个 `{`，然后循环 raw_decode + 跳到下一个 `{`。
+    丢弃解不出来的位置（最后那条不完整的 case），只保留 case-like 的 dict（含 title）。
+    """
+    decoder = json.JSONDecoder()
+    cases: list[dict] = []
+    i = raw.find("{")
+    while i != -1:
+        try:
+            obj, end = decoder.raw_decode(raw[i:])
+        except json.JSONDecodeError:
+            # 当前位置解不出来（比如是最后不完整的那条）—— 跳到下一个 `{` 重试。
+            i = raw.find("{", i + 1)
+            continue
+        if isinstance(obj, dict) and "title" in obj:
+            cases.append(obj)
+        # 从这个对象结束的位置继续找下一个 `{`，跳过内部嵌套避免误抓。
+        i = raw.find("{", i + end)
+    return cases
 
 
 def _extract_first_array(raw: str) -> list[dict] | None:
