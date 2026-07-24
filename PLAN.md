@@ -114,7 +114,8 @@
 - `GET /generate/stream/{task_id}` — 订阅指定任务的 SSE：先重放已缓存事件，再推送实时事件（支持断线重连续看）
 
 #### 审核
-- `GET /cases` — 最近 200 条用例，带审核状态
+- `GET /cases/batches` — 所有批次的汇总：`[{batch_id, total, reviewed, approved, req_text, created_at}]`。历史/审核页首屏用它渲染折叠卡片，避免一次拉全量被截断。
+- `GET /cases?batch_id=<uuid>` — 某个批次的全部用例（无上限）。不传 `batch_id` 时兼容旧调用返回最近 200 条概览。
 - `POST /cases/{id}/review` — 单条审核
 
 #### 导出 & 统计
