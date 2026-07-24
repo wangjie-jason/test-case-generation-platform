@@ -124,6 +124,7 @@ async def list_cases(batch_id: str | None = None, db: AsyncSession = Depends(get
     if batch_id:
         # 批次详情按 case 生成顺序展示（LLM 逐条产出的自然顺序），与"生成结果"页一致。
         # 同一批 case 是在 persist_cases 里几乎同时写入的，用 created_at ASC 就等于生成顺序。
+        # 手动插入的 case 通过 created_at = 前后两条中点，自然排到目标位置。
         stmt = select(TestCase).where(TestCase.batch_id == batch_id).order_by(TestCase.created_at.asc())
     else:
         # 无 batch_id 走概览路径：最近的批次在前，方便统计头/旧调用取样。
@@ -180,6 +181,87 @@ async def update_case(case_id: str, data: dict, db: AsyncSession = Depends(get_d
         "steps": tc.steps, "expected_result": tc.expected_result,
         "edited": bool(tc.edited), "edited_at": str(tc.edited_at) if tc.edited_at else None,
         "review": review_info,
+    }
+
+
+@router.post("/cases")
+async def create_case(data: dict, db: AsyncSession = Depends(get_db)):
+    """审核时手动插入用例。前端传 batch_id + 四字段 + 可选 prev_case_id/next_case_id 锚点。
+    定位策略：新 case 的 created_at = 前后两条 created_at 的中点，自然排到目标位置。
+    - 传了 prev/next：中点
+    - 只传 prev（末尾追加）：prev.created_at + 1 秒
+    - 只传 next（开头插入）：next.created_at - 1 秒
+    - 都不传：取当前时间（等价于末尾追加）
+    多次插入同位置时 created_at 会逐渐收敛到同一微秒，SQLite 此时按 rowid 插入顺序返回，
+    额外插入的几条天然排在一起，不影响业务。
+    手动插入的 case source='manual'、edited=True、review 直接置 approved。"""
+    from app.models.review_record import ReviewRecord
+
+    batch_id = data.get("batch_id")
+    if not batch_id:
+        raise HTTPException(400, "batch_id 必填")
+    title = (data.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, "title 必填")
+
+    from datetime import timedelta
+
+    prev_id = data.get("prev_case_id")
+    next_id = data.get("next_case_id")
+    prev_ts: datetime | None = None
+    next_ts: datetime | None = None
+    if prev_id:
+        prev_case = await db.get(TestCase, prev_id)
+        if prev_case and prev_case.batch_id == batch_id:
+            prev_ts = prev_case.created_at
+    if next_id:
+        next_case = await db.get(TestCase, next_id)
+        if next_case and next_case.batch_id == batch_id:
+            next_ts = next_case.created_at
+
+    if prev_ts is not None and next_ts is not None:
+        new_ts = prev_ts + (next_ts - prev_ts) / 2
+    elif prev_ts is not None:
+        new_ts = prev_ts + timedelta(seconds=1)
+    elif next_ts is not None:
+        new_ts = next_ts - timedelta(seconds=1)
+    else:
+        new_ts = now_local()
+
+    # 拿该批任一条 case 抄 req_text，保持批次上下文一致（生成时都是同一个需求）
+    batch_ref = (await db.execute(select(TestCase).where(TestCase.batch_id == batch_id).limit(1))).scalar_one_or_none()
+
+    steps = data.get("steps") or ""
+    if isinstance(steps, list):
+        steps = json.dumps(steps, ensure_ascii=False)
+
+    new_case = TestCase(
+        title=title,
+        precondition=data.get("precondition"),
+        steps=steps,
+        expected_result=data.get("expected_result"),
+        source="manual",
+        edited=True,
+        edited_at=now_local(),
+        created_at=new_ts,
+        batch_id=batch_id,
+        req_text=batch_ref.req_text if batch_ref else None,
+        kb_id=batch_ref.kb_id if batch_ref else None,
+    )
+    db.add(new_case)
+    # 手动插入的用例默认已审可用：内容是用户自己写的，直接 approve 免得再点一次
+    db.add(ReviewRecord(case_id=new_case.id, status="approved"))
+    await db.commit()
+    await db.refresh(new_case)
+
+    return {
+        "id": new_case.id, "title": new_case.title, "precondition": new_case.precondition,
+        "expected_result": new_case.expected_result, "steps": new_case.steps,
+        "source": new_case.source, "batch_id": new_case.batch_id, "req_text": new_case.req_text,
+        "created_at": str(new_case.created_at),
+        "edited": bool(new_case.edited),
+        "edited_at": str(new_case.edited_at) if new_case.edited_at else None,
+        "review": {"status": "approved", "reject_reason": None},
     }
 
 
