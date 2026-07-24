@@ -118,14 +118,14 @@ async def list_batches(db: AsyncSession = Depends(get_db)):
 @router.get("/cases")
 async def list_cases(batch_id: str | None = None, db: AsyncSession = Depends(get_db)):
     """列出用例。传入 batch_id 时只返回该批次全部用例（无上限，一次拉完），
-    不传时兼容旧调用：返回最近 200 条概览——旧调用只做统计头，不会踩到批次截断问题，
+    不传时兼容旧调用：返回最近 2000 条概览——旧调用只做统计头，不会踩到批次截断问题，
     新的历史/审核页请改走 /cases/batches + /cases?batch_id=xxx。"""
     from app.models.review_record import ReviewRecord
     stmt = select(TestCase).order_by(TestCase.created_at.desc())
     if batch_id:
         stmt = stmt.where(TestCase.batch_id == batch_id)
     else:
-        stmt = stmt.limit(200)
+        stmt = stmt.limit(2000)
     cases = (await db.execute(stmt)).scalars().all()
     case_ids = [c.id for c in cases]
     review_map = {}
