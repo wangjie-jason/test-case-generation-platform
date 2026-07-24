@@ -118,14 +118,16 @@ async def list_batches(db: AsyncSession = Depends(get_db)):
 @router.get("/cases")
 async def list_cases(batch_id: str | None = None, db: AsyncSession = Depends(get_db)):
     """列出用例。传入 batch_id 时只返回该批次全部用例（无上限，一次拉完），
-    不传时兼容旧调用：返回最近 2000 条概览——旧调用只做统计头，不会踩到批次截断问题，
+    不传时兼容旧调用：返回最近 5000 条概览——旧调用只做统计头，不会踩到批次截断问题，
     新的历史/审核页请改走 /cases/batches + /cases?batch_id=xxx。"""
     from app.models.review_record import ReviewRecord
-    stmt = select(TestCase).order_by(TestCase.created_at.desc())
     if batch_id:
-        stmt = stmt.where(TestCase.batch_id == batch_id)
+        # 批次详情按 case 生成顺序展示（LLM 逐条产出的自然顺序），与"生成结果"页一致。
+        # 同一批 case 是在 persist_cases 里几乎同时写入的，用 created_at ASC 就等于生成顺序。
+        stmt = select(TestCase).where(TestCase.batch_id == batch_id).order_by(TestCase.created_at.asc())
     else:
-        stmt = stmt.limit(2000)
+        # 无 batch_id 走概览路径：最近的批次在前，方便统计头/旧调用取样。
+        stmt = select(TestCase).order_by(TestCase.created_at.desc()).limit(5000)
     cases = (await db.execute(stmt)).scalars().all()
     case_ids = [c.id for c in cases]
     review_map = {}
