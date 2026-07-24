@@ -249,6 +249,8 @@ async def create_case(data: dict, db: AsyncSession = Depends(get_db)):
         kb_id=batch_ref.kb_id if batch_ref else None,
     )
     db.add(new_case)
+    # UUID 主键在 flush 前是 None，必须先 flush 让 new_case.id 落地，再挂 ReviewRecord.case_id
+    await db.flush()
     # 手动插入的用例默认已审可用：内容是用户自己写的，直接 approve 免得再点一次
     db.add(ReviewRecord(case_id=new_case.id, status="approved"))
     await db.commit()
