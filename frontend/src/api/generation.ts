@@ -55,6 +55,15 @@ export interface CaseRecord extends TestCase {
   } | null
 }
 
+export interface BatchSummary {
+  batch_id: string
+  total: number
+  reviewed: number
+  approved: number
+  req_text: string
+  created_at: string
+}
+
 export interface StatsOverview {
   total_cases: number
   reviewed_cases: number
@@ -128,7 +137,13 @@ export const generationApi = {
     form.append('file', file)
     return client.post<any, ParsedPrd>('/parse-prd', form, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
-  listCases() { return client.get<any, CaseRecord[]>('/cases') },
+  // 传入 batchId 时按批次拉全量用例，无 batchId 时兼容旧调用（最多 200 条概览）。
+  // 历史/审核页应先调 listBatches 拿汇总，再对展开的那一批调 listCases(batchId)。
+  listCases(batchId?: string) {
+    return client.get<any, CaseRecord[]>('/cases', batchId ? { params: { batch_id: batchId } } : undefined)
+  },
+  // 拉所有批次的汇总（总数/已审核/通过数/需求文本/时间），供历史与审核页折叠态渲染。
+  listBatches() { return client.get<any, BatchSummary[]>('/cases/batches') },
   reviewCase(caseId: string, data: { status: 'approved' | 'rejected'; reject_reason?: string }) {
     return client.post<any, { status: string }>(`/cases/${caseId}/review`, data)
   },
