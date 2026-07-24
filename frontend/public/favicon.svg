@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- 圆角方块背景：品牌蓝渐变 -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#4f8cff"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="12" fill="url(#bg)"/>
+
+  <!-- 文档主体 -->
+  <path d="M20 14 h20 l8 8 v28 a2 2 0 0 1 -2 2 H20 a2 2 0 0 1 -2 -2 V16 a2 2 0 0 1 2 -2 z"
+        fill="#ffffff" opacity="0.95"/>
+  <!-- 文档折角 -->
+  <path d="M40 14 v6 a2 2 0 0 0 2 2 h6" fill="none" stroke="#2563eb" stroke-width="1.5" stroke-linejoin="round"/>
+
+  <!-- 清单条目 -->
+  <line x1="24" y1="30" x2="36" y2="30" stroke="#2563eb" stroke-width="2" stroke-linecap="round"/>
+  <line x1="24" y1="38" x2="42" y2="38" stroke="#2563eb" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
+
+  <!-- 大对勾 -->
+  <path d="M25 46 l5 5 l12 -12"
+        fill="none" stroke="#22c55e" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
