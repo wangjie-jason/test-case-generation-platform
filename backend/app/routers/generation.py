@@ -3,7 +3,7 @@ import json
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import case, func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -70,63 +70,11 @@ async def generate_stream_reconnect(task_id: str):
     return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
-@router.get("/cases/batches")
-async def list_batches(db: AsyncSession = Depends(get_db)):
-    """按 batch_id 汇总所有历史批次：一次返回每批的总数/最新时间/需求文本。
-    历史/审核页用这个先渲染批次卡（折叠态），展开某批时再走 /cases?batch_id=xxx
-    拉该批的用例明细，避免一次拉全被 limit 截断（旧的 /cases 写死 200 就是这个坑）。"""
-    # 用聚合查询代替"拉全部再前端 group by"，即使批次上万也只回几百行。
-    stmt = (
-        select(
-            TestCase.batch_id,
-            func.count(TestCase.id).label("total"),
-            func.max(TestCase.created_at).label("created_at"),
-            func.max(TestCase.req_text).label("req_text"),
-        )
-        .group_by(TestCase.batch_id)
-        .order_by(func.max(TestCase.created_at).desc())
-    )
-    rows = (await db.execute(stmt)).all()
-
-    # 每批的审核进度：一次 GROUP BY 出 approved / total_reviewed，避免 N+1。
-    from app.models.review_record import ReviewRecord
-    review_stmt = (
-        select(
-            TestCase.batch_id,
-            func.count(ReviewRecord.id).label("reviewed"),
-            func.sum(case((ReviewRecord.status == "approved", 1), else_=0)).label("approved"),
-        )
-        .join(ReviewRecord, ReviewRecord.case_id == TestCase.id)
-        .group_by(TestCase.batch_id)
-    )
-    review_map = {row.batch_id: (row.reviewed or 0, row.approved or 0) for row in (await db.execute(review_stmt)).all()}
-
-    result = []
-    for row in rows:
-        reviewed, approved = review_map.get(row.batch_id, (0, 0))
-        result.append({
-            "batch_id": row.batch_id or "unknown",
-            "total": row.total,
-            "reviewed": reviewed,
-            "approved": approved,
-            "req_text": row.req_text or "",
-            "created_at": str(row.created_at) if row.created_at else "",
-        })
-    return result
-
-
 @router.get("/cases")
-async def list_cases(batch_id: str | None = None, db: AsyncSession = Depends(get_db)):
-    """列出用例。传入 batch_id 时只返回该批次全部用例（无上限，一次拉完），
-    不传时兼容旧调用：返回最近 200 条概览——旧调用只做统计头，不会踩到批次截断问题，
-    新的历史/审核页请改走 /cases/batches + /cases?batch_id=xxx。"""
+async def list_cases(db: AsyncSession = Depends(get_db)):
     from app.models.review_record import ReviewRecord
-    stmt = select(TestCase).order_by(TestCase.created_at.desc())
-    if batch_id:
-        stmt = stmt.where(TestCase.batch_id == batch_id)
-    else:
-        stmt = stmt.limit(200)
-    cases = (await db.execute(stmt)).scalars().all()
+    r = await db.execute(select(TestCase).order_by(TestCase.created_at.desc()).limit(200))
+    cases = r.scalars().all()
     case_ids = [c.id for c in cases]
     review_map = {}
     if case_ids:
