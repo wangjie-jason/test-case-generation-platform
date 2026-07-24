@@ -311,6 +311,7 @@ async function saveInsert() {
                 </div>
                 <div class="ri-body">
                   <div v-if="c.precondition" class="ri-line">前置：{{ c.precondition }}</div>
+                  <div v-if="c.steps" class="ri-line" style="white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
                   <div v-if="c.expected_result" class="ri-line">预期：{{ c.expected_result }}</div>
                 </div>
               </div>

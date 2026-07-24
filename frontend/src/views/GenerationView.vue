@@ -303,6 +303,8 @@ async function downloadBatch(batch: BatchSummary) {
               <div v-else-if="!b.items.length" style="text-align:center;color:#909399;padding:10px">暂无数据</div>
               <div v-else v-for="c in b.items" :key="c.id" style="padding:6px;border-bottom:1px solid #f0f0f0;font-size:13px">
                 <strong>{{ c.title }}</strong>
+                <div v-if="c.precondition" style="color:#909399">前置：{{ c.precondition }}</div>
+                <div v-if="c.steps" style="color:#909399;white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
                 <div v-if="c.expected_result" style="color:#909399">预期：{{ c.expected_result }}</div>
               </div>
             </el-collapse-item>
