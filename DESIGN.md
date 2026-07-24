@@ -387,7 +387,7 @@ state_machines  -- 状态机 (id, kb_id, entity, from_state, to_state, condition
 term_mappings   -- 术语映射 (id, kb_id, ui_term, tech_field, mapping_desc)
 prd_documents   -- PRD文档 (id, kb_id, filename, file_format, raw_text, chunk_count, created_at)
 defect_records  -- 缺陷记录 (id, kb_id, title, severity, root_cause, description, related_case, occurred_at, created_at)
-test_cases      -- 用例 (id, title, precondition, steps, expected_result, source[manual|ai], quality_score, knowledge_refs[json], batch_id, req_text, created_at)
+test_cases      -- 用例 (id, title, priority, precondition, steps, expected_result, source[manual|ai], quality_score, knowledge_refs[json], batch_id, req_text, edited, edited_at, created_at)
 review_records  -- 审核记录 (id, case_id, status[approved|rejected], reject_reason, reviewer_comment, reviewed_at)
 
 -- ChromaDB collections:

@@ -35,6 +35,7 @@ async def init_db():
         # 但重复执行会报错，所以先查 pragma。项目没接 Alembic，先用这种手工方式撑住。
         await conn.run_sync(_migrate_prd_document_source_columns)
         await conn.run_sync(_migrate_test_case_edit_columns)
+        await conn.run_sync(_migrate_test_case_priority_column)
 
 
 def _migrate_prd_document_source_columns(sync_conn) -> None:
@@ -61,3 +62,13 @@ def _migrate_test_case_edit_columns(sync_conn) -> None:
         sync_conn.execute(text("ALTER TABLE test_cases ADD COLUMN edited BOOLEAN NOT NULL DEFAULT 0"))
     if "edited_at" not in cols:
         sync_conn.execute(text("ALTER TABLE test_cases ADD COLUMN edited_at DATETIME"))
+
+
+def _migrate_test_case_priority_column(sync_conn) -> None:
+    """LLM 生成的 priority 之前一直没入库，导致审核/历史/编辑三处都读不到等级。
+    老库补一列 priority（可空），历史用例读到 None 前端兜底展示为 P2 默认档。"""
+    from sqlalchemy import text
+
+    cols = {row[1] for row in sync_conn.execute(text("PRAGMA table_info(test_cases)"))}
+    if "priority" not in cols:
+        sync_conn.execute(text("ALTER TABLE test_cases ADD COLUMN priority VARCHAR(4)"))
