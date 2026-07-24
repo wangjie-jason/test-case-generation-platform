@@ -176,6 +176,63 @@ async function saveEdit() {
     editSaving.value = false
   }
 }
+
+// —— 手动插入用例弹窗 ——
+// 场景：AI 漏了整个模块/功能，用户想在两条 case 之间补一条。
+// 后端用 sort_order 中点定位，前端只负责传前后两条 case 的 id 作为锚点。
+// 保存后新 case 直接插入到列表对应位置，batch 汇总的 total/reviewed/approved 各 +1
+// （手动插入的默认 approved，无需再审）。
+const insertDialogVisible = ref(false)
+const insertSaving = ref(false)
+const insertForm = ref<{ batch_id: string; prev_case_id: string | null; next_case_id: string | null; insertAt: number; title: string; precondition: string; steps: string; expected_result: string }>({
+  batch_id: '', prev_case_id: null, next_case_id: null, insertAt: 0,
+  title: '', precondition: '', steps: '', expected_result: '',
+})
+
+// insertAt 是要插入到本地 items 数组的目标下标：0=最开头，items.length=最末尾
+function openInsertDialog(bid: string, insertAt: number) {
+  const items = batchItems.value[bid] || []
+  insertForm.value = {
+    batch_id: bid,
+    prev_case_id: insertAt > 0 ? items[insertAt - 1].id : null,
+    next_case_id: insertAt < items.length ? items[insertAt].id : null,
+    insertAt,
+    title: '', precondition: '', steps: '', expected_result: '',
+  }
+  insertDialogVisible.value = true
+}
+
+async function saveInsert() {
+  if (!insertForm.value.title.trim()) {
+    ElMessage.warning('标题不能为空')
+    return
+  }
+  insertSaving.value = true
+  try {
+    const created = await generationApi.createCase({
+      batch_id: insertForm.value.batch_id,
+      prev_case_id: insertForm.value.prev_case_id,
+      next_case_id: insertForm.value.next_case_id,
+      title: insertForm.value.title,
+      precondition: insertForm.value.precondition,
+      steps: insertForm.value.steps,
+      expected_result: insertForm.value.expected_result,
+    })
+    const items = batchItems.value[insertForm.value.batch_id]
+    if (items) {
+      items.splice(insertForm.value.insertAt, 0, created)
+    }
+    // 手动插入的 case 后端直接 approved，同步 batch 汇总
+    const b = batches.value.find(x => x.batch_id === insertForm.value.batch_id)
+    if (b) { b.total += 1; b.reviewed += 1; b.approved += 1 }
+    ElMessage.success('已插入用例')
+    insertDialogVisible.value = false
+  } catch (e: any) {
+    ElMessage.error(e?.message || '插入失败')
+  } finally {
+    insertSaving.value = false
+  }
+}
 </script>
 
 <template>
@@ -226,30 +283,43 @@ async function saveEdit() {
           <div v-else-if="!batch.items.length" style="text-align:center;color:#909399;padding:10px">
             {{ batch.loaded ? '当前筛选下无匹配用例' : '暂无数据' }}
           </div>
-          <div v-else v-for="c in batch.items" :key="c.id" class="review-item" :class="{ approved: c.review?.status === 'approved', rejected: c.review?.status === 'rejected' }">
-            <div class="ri-header">
-              <span class="ri-title">{{ c.title }}</span>
-              <el-tag v-if="c.edited" size="small" type="warning" effect="plain" style="margin-right:4px">已编辑</el-tag>
-              <el-tag v-if="c.review?.status === 'approved'" type="success" size="small">✓</el-tag>
-              <el-tag v-else-if="c.review?.status === 'rejected'" type="danger" size="small">✗ {{ rejectReasons.find(r => r.value === c.review?.reject_reason)?.label || '' }}</el-tag>
-              <template v-else>
-                <el-button size="small" type="success" @click="approveCase(c.id, batch.batch_id)" style="margin-left:8px">通过</el-button>
-                <el-button size="small" @click="openEditDialog(c, batch.batch_id)" style="margin-left:4px">编辑</el-button>
-                <el-popover placement="bottom" :width="200" trigger="click">
-                  <template #reference>
-                    <el-button size="small" type="danger">不可用</el-button>
+          <template v-else>
+            <!-- 首个用例前的插入位 -->
+            <div class="insert-slot" v-if="filterTab === 'all'" @click="openInsertDialog(batch.batch_id, 0)">
+              <span class="insert-line"></span><span class="insert-btn">+ 在此处插入用例</span><span class="insert-line"></span>
+            </div>
+            <template v-for="(c, idx) in batch.items" :key="c.id">
+              <div class="review-item" :class="{ approved: c.review?.status === 'approved', rejected: c.review?.status === 'rejected' }">
+                <div class="ri-header">
+                  <span class="ri-title">{{ c.title }}</span>
+                  <el-tag v-if="c.edited" size="small" type="warning" effect="plain" style="margin-right:4px">已编辑</el-tag>
+                  <el-tag v-if="c.source === 'manual'" size="small" type="info" effect="plain" style="margin-right:4px">手动</el-tag>
+                  <el-tag v-if="c.review?.status === 'approved'" type="success" size="small">✓</el-tag>
+                  <el-tag v-else-if="c.review?.status === 'rejected'" type="danger" size="small">✗ {{ rejectReasons.find(r => r.value === c.review?.reject_reason)?.label || '' }}</el-tag>
+                  <template v-else>
+                    <el-button size="small" type="success" @click="approveCase(c.id, batch.batch_id)" style="margin-left:8px">通过</el-button>
+                    <el-button size="small" @click="openEditDialog(c, batch.batch_id)" style="margin-left:4px">编辑</el-button>
+                    <el-popover placement="bottom" :width="200" trigger="click">
+                      <template #reference>
+                        <el-button size="small" type="danger">不可用</el-button>
+                      </template>
+                      <el-button v-for="r in rejectReasons" :key="r.value" size="small" style="margin:2px" @click="rejectCase(c.id, batch.batch_id, r.value)">{{ r.label }}</el-button>
+                    </el-popover>
                   </template>
-                  <el-button v-for="r in rejectReasons" :key="r.value" size="small" style="margin:2px" @click="rejectCase(c.id, batch.batch_id, r.value)">{{ r.label }}</el-button>
-                </el-popover>
-              </template>
-              <!-- 已通过或已拒绝的用例也允许编辑；编辑不改 review 状态，只改内容 -->
-              <el-button v-if="c.review" size="small" text @click="openEditDialog(c, batch.batch_id)" style="margin-left:4px">编辑</el-button>
-            </div>
-            <div class="ri-body">
-              <div v-if="c.precondition" class="ri-line">前置：{{ c.precondition }}</div>
-              <div v-if="c.expected_result" class="ri-line">预期：{{ c.expected_result }}</div>
-            </div>
-          </div>
+                  <!-- 已通过或已拒绝的用例也允许编辑；编辑不改 review 状态，只改内容 -->
+                  <el-button v-if="c.review" size="small" text @click="openEditDialog(c, batch.batch_id)" style="margin-left:4px">编辑</el-button>
+                </div>
+                <div class="ri-body">
+                  <div v-if="c.precondition" class="ri-line">前置：{{ c.precondition }}</div>
+                  <div v-if="c.expected_result" class="ri-line">预期：{{ c.expected_result }}</div>
+                </div>
+              </div>
+              <!-- 每条 case 之后的插入位；筛选 tab 下隐藏（否则插入位置会错位） -->
+              <div class="insert-slot" v-if="filterTab === 'all'" @click="openInsertDialog(batch.batch_id, idx + 1)">
+                <span class="insert-line"></span><span class="insert-btn">+ 在此处插入用例</span><span class="insert-line"></span>
+              </div>
+            </template>
+          </template>
         </el-collapse-item>
       </el-collapse>
     </div>
@@ -276,6 +346,28 @@ async function saveEdit() {
       <el-button type="primary" @click="saveEdit" :loading="editSaving">保存</el-button>
     </template>
   </el-dialog>
+
+  <!-- 插入用例弹窗 -->
+  <el-dialog v-model="insertDialogVisible" title="插入新用例" width="600px" :close-on-click-modal="false">
+    <el-form label-position="top" size="small">
+      <el-form-item label="标题">
+        <el-input v-model="insertForm.title" placeholder="用例标题" :disabled="insertSaving" />
+      </el-form-item>
+      <el-form-item label="前置条件">
+        <el-input v-model="insertForm.precondition" placeholder="前置条件（可选）" :disabled="insertSaving" />
+      </el-form-item>
+      <el-form-item label="测试步骤">
+        <el-input v-model="insertForm.steps" type="textarea" :rows="4" placeholder="每行一步" :disabled="insertSaving" />
+      </el-form-item>
+      <el-form-item label="预期结果">
+        <el-input v-model="insertForm.expected_result" type="textarea" :rows="3" placeholder="预期结果" :disabled="insertSaving" />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="insertDialogVisible = false" :disabled="insertSaving">取消</el-button>
+      <el-button type="primary" @click="saveInsert" :loading="insertSaving">插入</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -297,4 +389,9 @@ async function saveEdit() {
 .ri-title { font-size: 13px; font-weight: 600; flex: 1; }
 .ri-body { margin-top: 4px; padding-left: 4px; }
 .ri-line { font-size: 12px; color: #909399; }
+/* 行间插入位：默认极细一条空隙，hover 才亮起"+ 在此处插入用例"，不打扰阅读 */
+.insert-slot { display: flex; align-items: center; gap: 8px; height: 8px; cursor: pointer; opacity: 0; transition: opacity 0.15s ease, height 0.15s ease; user-select: none; }
+.insert-slot:hover { opacity: 1; height: 24px; }
+.insert-line { flex: 1; height: 1px; background: #409EFF; }
+.insert-btn { font-size: 12px; color: #409EFF; white-space: nowrap; }
 </style>

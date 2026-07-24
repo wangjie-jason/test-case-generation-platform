@@ -154,6 +154,11 @@ export const generationApi = {
   updateCase(caseId: string, data: { title?: string; precondition?: string | null; steps?: string | null; expected_result?: string | null }) {
     return client.patch<any, CaseRecord>(`/cases/${caseId}`, data)
   },
+  // 审核时手动插入用例。传前后两条 case 的 id 作为锚点，服务端算 sort_order 中点。
+  // 首/末尾插入时只传一侧即可；都不传等价于批次末尾追加。
+  createCase(data: { batch_id: string; title: string; precondition?: string | null; steps?: string | null; expected_result?: string | null; prev_case_id?: string | null; next_case_id?: string | null }) {
+    return client.post<any, CaseRecord>('/cases', data)
+  },
   exportCases(cases: CaseRecord[] | GeneratedTestCase[]) {
     return client.post<any, Blob>('/cases/export', { cases }, { responseType: 'blob' })
   },
