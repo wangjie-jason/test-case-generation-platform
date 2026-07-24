@@ -126,8 +126,8 @@ async function rejectAllInBatch(bid: string, items: CaseRecord[], reason: string
 // 不污染 AI 可用率。可用率始终反映 AI 一次到位的能力。
 const editDialogVisible = ref(false)
 const editSaving = ref(false)
-const editForm = ref<{ id: string; batch_id: string; title: string; precondition: string; steps: string; expected_result: string }>({
-  id: '', batch_id: '', title: '', precondition: '', steps: '', expected_result: '',
+const editForm = ref<{ id: string; batch_id: string; title: string; priority: string; precondition: string; steps: string; expected_result: string }>({
+  id: '', batch_id: '', title: '', priority: '', precondition: '', steps: '', expected_result: '',
 })
 
 function openEditDialog(c: CaseRecord, bid: string) {
@@ -135,6 +135,7 @@ function openEditDialog(c: CaseRecord, bid: string) {
     id: c.id,
     batch_id: bid,
     title: c.title || '',
+    priority: c.priority || '',
     precondition: c.precondition || '',
     // steps 可能是数组（老的 GeneratedTestCase 结构）或字符串，统一转成字符串给 textarea 用
     steps: Array.isArray(c.steps) ? (c.steps as unknown[]).map(String).join('\n') : (c.steps || ''),
@@ -152,6 +153,7 @@ async function saveEdit() {
   try {
     const updated = await generationApi.updateCase(editForm.value.id, {
       title: editForm.value.title,
+      priority: editForm.value.priority || null,
       precondition: editForm.value.precondition,
       steps: editForm.value.steps,
       expected_result: editForm.value.expected_result,
@@ -160,6 +162,7 @@ async function saveEdit() {
     const c = items?.find(x => x.id === editForm.value.id)
     if (c) {
       c.title = updated.title
+      c.priority = updated.priority
       c.precondition = updated.precondition
       c.steps = updated.steps
       c.expected_result = updated.expected_result
@@ -184,9 +187,9 @@ async function saveEdit() {
 // （手动插入的默认 approved，无需再审）。
 const insertDialogVisible = ref(false)
 const insertSaving = ref(false)
-const insertForm = ref<{ batch_id: string; prev_case_id: string | null; next_case_id: string | null; insertAt: number; title: string; precondition: string; steps: string; expected_result: string }>({
+const insertForm = ref<{ batch_id: string; prev_case_id: string | null; next_case_id: string | null; insertAt: number; title: string; priority: string; precondition: string; steps: string; expected_result: string }>({
   batch_id: '', prev_case_id: null, next_case_id: null, insertAt: 0,
-  title: '', precondition: '', steps: '', expected_result: '',
+  title: '', priority: '', precondition: '', steps: '', expected_result: '',
 })
 
 // insertAt 是要插入到本地 items 数组的目标下标：0=最开头，items.length=最末尾
@@ -197,7 +200,7 @@ function openInsertDialog(bid: string, insertAt: number) {
     prev_case_id: insertAt > 0 ? items[insertAt - 1].id : null,
     next_case_id: insertAt < items.length ? items[insertAt].id : null,
     insertAt,
-    title: '', precondition: '', steps: '', expected_result: '',
+    title: '', priority: '', precondition: '', steps: '', expected_result: '',
   }
   insertDialogVisible.value = true
 }
@@ -214,6 +217,7 @@ async function saveInsert() {
       prev_case_id: insertForm.value.prev_case_id,
       next_case_id: insertForm.value.next_case_id,
       title: insertForm.value.title,
+      priority: insertForm.value.priority || null,
       precondition: insertForm.value.precondition,
       steps: insertForm.value.steps,
       expected_result: insertForm.value.expected_result,
@@ -292,6 +296,7 @@ async function saveInsert() {
               <div class="review-item" :class="{ approved: c.review?.status === 'approved', rejected: c.review?.status === 'rejected' }">
                 <div class="ri-header">
                   <span class="ri-title">{{ c.title }}</span>
+                  <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:4px">{{ c.priority }}</el-tag>
                   <el-tag v-if="c.edited" size="small" type="warning" effect="plain" style="margin-right:4px">已编辑</el-tag>
                   <el-tag v-if="c.source === 'manual'" size="small" type="info" effect="plain" style="margin-right:4px">手动</el-tag>
                   <el-tag v-if="c.review?.status === 'approved'" type="success" size="small">✓</el-tag>
@@ -332,6 +337,13 @@ async function saveInsert() {
       <el-form-item label="标题">
         <el-input v-model="editForm.title" placeholder="用例标题" :disabled="editSaving" />
       </el-form-item>
+      <el-form-item label="等级">
+        <el-select v-model="editForm.priority" placeholder="选择等级（可留空）" clearable :disabled="editSaving" style="width:180px">
+          <el-option label="P0 核心" value="P0" />
+          <el-option label="P1 重要" value="P1" />
+          <el-option label="P2 边缘" value="P2" />
+        </el-select>
+      </el-form-item>
       <el-form-item label="前置条件">
         <el-input v-model="editForm.precondition" placeholder="前置条件（可选）" :disabled="editSaving" />
       </el-form-item>
@@ -353,6 +365,13 @@ async function saveInsert() {
     <el-form label-position="top" size="small">
       <el-form-item label="标题">
         <el-input v-model="insertForm.title" placeholder="用例标题" :disabled="insertSaving" />
+      </el-form-item>
+      <el-form-item label="等级">
+        <el-select v-model="insertForm.priority" placeholder="选择等级（可留空）" clearable :disabled="insertSaving" style="width:180px">
+          <el-option label="P0 核心" value="P0" />
+          <el-option label="P1 重要" value="P1" />
+          <el-option label="P2 边缘" value="P2" />
+        </el-select>
       </el-form-item>
       <el-form-item label="前置条件">
         <el-input v-model="insertForm.precondition" placeholder="前置条件（可选）" :disabled="insertSaving" />

@@ -31,6 +31,7 @@ async def persist_cases(db, cases: list[dict], batch_name: str | None, requireme
         tc = TestCase(
             title=c.get("title", ""), precondition=c.get("precondition", ""),
             steps=steps, expected_result=c.get("expected_result", ""),
+            priority=(c.get("priority") or None),
             source="ai", batch_id=batch_id, req_text=batch_name or requirement_text[:80],
             knowledge_refs=json.dumps(c.get("knowledge_refs", []), ensure_ascii=False),
         )

@@ -135,7 +135,7 @@ async def list_cases(batch_id: str | None = None, db: AsyncSession = Depends(get
     if case_ids:
         rr = await db.execute(select(ReviewRecord).where(ReviewRecord.case_id.in_(case_ids)))
         for rec in rr.scalars().all(): review_map[rec.case_id] = {"status": rec.status, "reject_reason": rec.reject_reason}
-    return [{"id": c.id, "title": c.title, "precondition": c.precondition, "expected_result": c.expected_result, "steps": c.steps, "source": c.source, "batch_id": c.batch_id, "req_text": c.req_text, "created_at": str(c.created_at), "edited": bool(c.edited), "edited_at": str(c.edited_at) if c.edited_at else None, "review": review_map.get(c.id)} for c in cases]
+    return [{"id": c.id, "title": c.title, "priority": c.priority, "precondition": c.precondition, "expected_result": c.expected_result, "steps": c.steps, "source": c.source, "batch_id": c.batch_id, "req_text": c.req_text, "created_at": str(c.created_at), "edited": bool(c.edited), "edited_at": str(c.edited_at) if c.edited_at else None, "review": review_map.get(c.id)} for c in cases]
 
 
 @router.patch("/cases/{case_id}")
@@ -151,9 +151,9 @@ async def update_case(case_id: str, data: dict, db: AsyncSession = Depends(get_d
     if not tc:
         raise HTTPException(404, "用例不存在")
 
-    # 只接受这四个字段；未传的字段保持原值，允许只改一处。前端目前是四字段一起提交，
-    # 但接口设计成 patch 语义，方便后续做 inline 快改。
-    editable = ("title", "precondition", "steps", "expected_result")
+    # 只接受这五个字段；未传的字段保持原值，允许只改一处。前端目前是整表提交，
+    # 但接口设计成 patch 语义，方便后续做 inline 快改。priority 允许改成 None（清空）。
+    editable = ("title", "priority", "precondition", "steps", "expected_result")
     touched = False
     for k in editable:
         if k in data and data[k] is not None:
@@ -177,7 +177,7 @@ async def update_case(case_id: str, data: dict, db: AsyncSession = Depends(get_d
 
     await db.commit()
     return {
-        "id": tc.id, "title": tc.title, "precondition": tc.precondition,
+        "id": tc.id, "title": tc.title, "priority": tc.priority, "precondition": tc.precondition,
         "steps": tc.steps, "expected_result": tc.expected_result,
         "edited": bool(tc.edited), "edited_at": str(tc.edited_at) if tc.edited_at else None,
         "review": review_info,
@@ -237,6 +237,7 @@ async def create_case(data: dict, db: AsyncSession = Depends(get_db)):
 
     new_case = TestCase(
         title=title,
+        priority=(data.get("priority") or None),
         precondition=data.get("precondition"),
         steps=steps,
         expected_result=data.get("expected_result"),
@@ -257,7 +258,7 @@ async def create_case(data: dict, db: AsyncSession = Depends(get_db)):
     await db.refresh(new_case)
 
     return {
-        "id": new_case.id, "title": new_case.title, "precondition": new_case.precondition,
+        "id": new_case.id, "title": new_case.title, "priority": new_case.priority, "precondition": new_case.precondition,
         "expected_result": new_case.expected_result, "steps": new_case.steps,
         "source": new_case.source, "batch_id": new_case.batch_id, "req_text": new_case.req_text,
         "created_at": str(new_case.created_at),

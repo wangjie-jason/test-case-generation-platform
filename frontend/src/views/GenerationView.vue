@@ -302,6 +302,7 @@ async function downloadBatch(batch: BatchSummary) {
               <div v-if="b.loading" style="text-align:center;color:#909399;padding:10px">加载中...</div>
               <div v-else-if="!b.items.length" style="text-align:center;color:#909399;padding:10px">暂无数据</div>
               <div v-else v-for="c in b.items" :key="c.id" style="padding:6px;border-bottom:1px solid #f0f0f0;font-size:13px">
+                <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:6px">{{ c.priority }}</el-tag>
                 <strong>{{ c.title }}</strong>
                 <div v-if="c.precondition" style="color:#909399">前置：{{ c.precondition }}</div>
                 <div v-if="c.steps" style="color:#909399;white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
