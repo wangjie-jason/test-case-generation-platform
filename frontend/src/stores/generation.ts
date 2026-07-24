@@ -52,8 +52,11 @@ export const useGenerationStore = defineStore('generation', () => {
   // 当前在结果区查看的任务 id（不影响其它任务继续在后台跑）
   const activeTaskId = ref<string | null>(null)
 
-  // 历史记录
-  const history = ref<CaseRecord[]>([])
+  // 历史记录：老实现在这里缓存整个用例列表（listCases()），已被 GenerationView
+  // 改造为「先拉 batches 汇总、点开某批再懒加载」的模式，缓存移到组件本地。
+  // 这里仅保留一个 dirty 计数：每次生成结束 +1，视图 watch 它就能自动刷新批次汇总，
+  // 避免 store 反向依赖 batches 数据结构。
+  const historyDirty = ref(0)
 
   let kbsLoaded = false
 
@@ -82,11 +85,8 @@ export const useGenerationStore = defineStore('generation', () => {
   }
 
   async function fetchHistory() {
-    try {
-      history.value = await generationApi.listCases()
-    } catch {
-      ElMessage.error('加载生成历史失败')
-    }
+    // 保留兼容占位：老逻辑一次拉全部用例，现在换成通知视图重拉批次汇总。
+    historyDirty.value += 1
   }
 
   async function parsePrd(file: File) {
@@ -246,7 +246,7 @@ export const useGenerationStore = defineStore('generation', () => {
     knowledgeMatches,
     validationWarnings,
     taskTitle,
-    history,
+    historyDirty,
     fetchKbs,
     fetchHistory,
     parsePrd,

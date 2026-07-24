@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onMounted, computed } from 'vue'
+import { onMounted, computed, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { generationApi, type CaseRecord } from '@/api/generation'
+import { generationApi, type CaseRecord, type BatchSummary } from '@/api/generation'
 import { ElMessage } from 'element-plus'
 import { useGenerationStore } from '@/stores/generation'
 import { UploadFilled, Loading, Close } from '@element-plus/icons-vue'
@@ -11,11 +11,42 @@ const store = useGenerationStore()
 const {
   kbs, selectedKbs, requirementText, batchName, inputMode, isParsing, parsedFilename,
   tabActive, isGenerating, cases, genProgress, streamText, knowledgeCounts,
-  knowledgeMatches, history, taskList, activeTaskId, runningCount,
-  clarifiedText, isClarifying,
+  knowledgeMatches, taskList, activeTaskId, runningCount,
+  clarifiedText, isClarifying, historyDirty,
 } = storeToRefs(store)
 
-onMounted(() => { store.fetchKbs(); store.fetchHistory() })
+// 历史记录：先拉批次汇总渲染折叠卡片，点开某批时再懒加载该批全量用例。
+// 老实现是一次拉 /cases（写死 200 上限），大批次会被截断——现在按 batch_id 精确拉。
+const batches = ref<BatchSummary[]>([])
+const batchItems = ref<Record<string, CaseRecord[]>>({})
+const loadingBatch = ref<Record<string, boolean>>({})
+
+async function fetchBatches() {
+  try {
+    batches.value = await generationApi.listBatches()
+  } catch { ElMessage.error('加载生成历史失败') }
+}
+
+async function loadBatchItems(bid: string) {
+  if (batchItems.value[bid] || loadingBatch.value[bid]) return
+  loadingBatch.value[bid] = true
+  try {
+    batchItems.value[bid] = await generationApi.listCases(bid)
+  } catch (e: any) {
+    ElMessage.error(e?.message || '加载批次失败')
+  } finally {
+    loadingBatch.value[bid] = false
+  }
+}
+
+onMounted(() => { store.fetchKbs(); fetchBatches() })
+
+// 生成结束时 store 会把 historyDirty +1，触发这里重拉批次汇总 + 清空 items 缓存，
+// 避免旧的懒加载数据里少了刚生成的一批。
+watch(historyDirty, () => {
+  batchItems.value = {}
+  fetchBatches()
+})
 
 function handlePrdUpload(options: any) {
   return store.parsePrd(options.file)
@@ -90,15 +121,18 @@ function matchDescription(groupKey: string, item: Record<string, unknown>) {
   return text.length > 160 ? `${text.slice(0, 160)}...` : text
 }
 
-const batchGroups = computed(() => {
-  const map: Record<string, any[]> = {}
-  for (const c of history.value) { const bid = c.batch_id || 'unknown'; if (!map[bid]) map[bid] = []; map[bid].push(c) }
-  return Object.entries(map).map(([bid, items]) => ({ batch_id: bid, req_text: items[0]?.req_text || '', created_at: items[0]?.created_at || '', total: items.length, items })).sort((a: any, b: any) => b.created_at.localeCompare(a.created_at))
-})
+const batchGroups = computed(() => batches.value.map(b => ({
+  ...b,
+  items: batchItems.value[b.batch_id] || [],
+  loading: !!loadingBatch.value[b.batch_id],
+})))
 
-async function downloadBatch(batch: { req_text?: string | null; created_at?: string; items: CaseRecord[] }) {
+async function downloadBatch(batch: BatchSummary) {
   try {
-    const blob = await generationApi.exportCases(batch.items)
+    // 保证下载到的是全量：即使用户没展开也现拉一次。
+    const items = batchItems.value[batch.batch_id] || await generationApi.listCases(batch.batch_id)
+    batchItems.value[batch.batch_id] = items
+    const blob = await generationApi.exportCases(items)
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
     const name = batch.req_text || batch.created_at?.slice(0, 10) || 'test_cases'
@@ -252,15 +286,22 @@ async function downloadBatch(batch: { req_text?: string | null; created_at?: str
 
     <div v-if="tabActive === 'history'" class="history-tab">
       <el-card>
-        <template #header><span>生成历史（{{ batchGroups.length }} 批次）</span></template>
+        <template #header>
+          <div class="results-toolbar">
+            <span>生成历史（{{ batchGroups.length }} 批次）</span>
+            <el-button size="small" @click="fetchBatches">刷新</el-button>
+          </div>
+        </template>
         <div v-for="b in batchGroups" :key="b.batch_id" class="batch-card">
           <div class="batch-header">
             <div><strong class="batch-name">{{ b.req_text?.slice(0, 60) || '未命名需求' }}</strong><span class="batch-meta-info">{{ b.total }} 条 · {{ b.created_at?.slice(0, 16) }}</span></div>
             <el-button size="small" type="success" @click="downloadBatch(b)">下载 Excel</el-button>
           </div>
-          <el-collapse>
-            <el-collapse-item :title="`展开 ${b.total} 条用例`">
-              <div v-for="c in b.items" :key="c.id" style="padding:6px;border-bottom:1px solid #f0f0f0;font-size:13px">
+          <el-collapse @change="(val: string | string[]) => (Array.isArray(val) ? val : [val]).includes(b.batch_id) && loadBatchItems(b.batch_id)">
+            <el-collapse-item :title="`展开 ${b.total} 条用例`" :name="b.batch_id">
+              <div v-if="b.loading" style="text-align:center;color:#909399;padding:10px">加载中...</div>
+              <div v-else-if="!b.items.length" style="text-align:center;color:#909399;padding:10px">暂无数据</div>
+              <div v-else v-for="c in b.items" :key="c.id" style="padding:6px;border-bottom:1px solid #f0f0f0;font-size:13px">
                 <strong>{{ c.title }}</strong>
                 <div v-if="c.expected_result" style="color:#909399">预期：{{ c.expected_result }}</div>
               </div>
