@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import get_db, now_local
 from app.models.test_case import TestCase
 from app.schemas.generation import GenerateRequest
 from app.services.generator_service import GeneratorService
@@ -134,7 +134,53 @@ async def list_cases(batch_id: str | None = None, db: AsyncSession = Depends(get
     if case_ids:
         rr = await db.execute(select(ReviewRecord).where(ReviewRecord.case_id.in_(case_ids)))
         for rec in rr.scalars().all(): review_map[rec.case_id] = {"status": rec.status, "reject_reason": rec.reject_reason}
-    return [{"id": c.id, "title": c.title, "precondition": c.precondition, "expected_result": c.expected_result, "steps": c.steps, "source": c.source, "batch_id": c.batch_id, "req_text": c.req_text, "created_at": str(c.created_at), "review": review_map.get(c.id)} for c in cases]
+    return [{"id": c.id, "title": c.title, "precondition": c.precondition, "expected_result": c.expected_result, "steps": c.steps, "source": c.source, "batch_id": c.batch_id, "req_text": c.req_text, "created_at": str(c.created_at), "edited": bool(c.edited), "edited_at": str(c.edited_at) if c.edited_at else None, "review": review_map.get(c.id)} for c in cases]
+
+
+@router.patch("/cases/{case_id}")
+async def update_case(case_id: str, data: dict, db: AsyncSession = Depends(get_db)):
+    """审核阶段的人工微调：允许改 title/precondition/steps/expected_result 四字段。
+    编辑只改用例内容 + 打 edited 标记，不碰 review 记录。
+    好处：
+    - 原始 reject_reason（如 context_missing）保留不丢，AI 训练信号完整
+    - 已 reject 的 case 编辑后内容已补全，前端可据此让它出现在导出中
+    - 已 approve 的 case 编辑后仍是 approved，只是多一个「已编辑」标记"""
+    from app.models.review_record import ReviewRecord
+    tc = await db.get(TestCase, case_id)
+    if not tc:
+        raise HTTPException(404, "用例不存在")
+
+    # 只接受这四个字段；未传的字段保持原值，允许只改一处。前端目前是四字段一起提交，
+    # 但接口设计成 patch 语义，方便后续做 inline 快改。
+    editable = ("title", "precondition", "steps", "expected_result")
+    touched = False
+    for k in editable:
+        if k in data and data[k] is not None:
+            new_val = data[k]
+            # steps 允许前端传数组或字符串；DB 里 steps 是 Text，跟 task_service 的写入保持一致——数组转 JSON 存。
+            if k == "steps" and isinstance(new_val, list):
+                new_val = json.dumps(new_val, ensure_ascii=False)
+            if getattr(tc, k) != new_val:
+                setattr(tc, k, new_val)
+                touched = True
+
+    if touched:
+        tc.edited = True
+        tc.edited_at = now_local()
+
+    # 编辑不碰 review 记录！保留原始 reject_reason 信号。
+    # 前端拿到 edited=True 后，可自行决定导出时包含编辑过的用例。
+    rr = await db.execute(select(ReviewRecord).where(ReviewRecord.case_id == case_id))
+    rec = rr.scalars().first()
+    review_info = {"status": rec.status, "reject_reason": rec.reject_reason} if rec else None
+
+    await db.commit()
+    return {
+        "id": tc.id, "title": tc.title, "precondition": tc.precondition,
+        "steps": tc.steps, "expected_result": tc.expected_result,
+        "edited": bool(tc.edited), "edited_at": str(tc.edited_at) if tc.edited_at else None,
+        "review": review_info,
+    }
 
 
 @router.post("/cases/{case_id}/review")
@@ -180,5 +226,7 @@ async def stats_overview(db: AsyncSession = Depends(get_db)):
     reviewed = len(approved) + len(rejected)
     dist = {}
     for r in rejected:
+        # reject_reason 现在有一个特殊值 'edited'：代表 AI 一次没到位、人工微调后可用，
+        # 归类到「不通过」但和幻觉/丢弃并列展示，便于识别「差一点点」的用例占比。
         if r.reject_reason: dist[r.reject_reason] = dist.get(r.reject_reason, 0) + 1
     return {"total_cases": total_n, "reviewed_cases": reviewed, "approved_cases": len(approved), "rejected_cases": len(rejected), "usability_rate": round((len(approved) / reviewed * 100) if reviewed > 0 else 0), "hallucination_distribution": dist, "generation_count": total_n}

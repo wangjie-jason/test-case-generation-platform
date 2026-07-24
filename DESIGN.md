@@ -12,6 +12,7 @@
 | v0.7 | 2026-07-01 | 并行生成（前端多任务）+ 多人隔离（client_id / owner_id）；新增需求补全 `POST /generate/clarify`（知识库补齐简略需求）；清理死代码（删除 `POST /generate`、`/generate/stream`）；LLM 调用容错（429 不重试、5xx 退避重试） |
 | v0.8 | 2026-07-15 | SSE 新增 `knowledge` 事件：检索结束后立即推送命中知识明细，前端不用等生成/评审完成即可展示；`complete` 仍带同字段作为断线重连兜底                                                                                        |
 | v0.9 | 2026-07-22 | PRD 导入支持飞书链接（Wiki 节点 / docx / 旧 doc），Docx 内表格转 GFM Markdown 保留结构；`PrdDocument` 新增 `source_type` / `source_ref`，按 obj_token 覆盖去重                                                            |
+| v0.10 | 2026-07-24 | 审核阶段允许人工微调用例文案：新增 `PATCH /cases/{id}`，可改 title/precondition/steps/expected_result；编辑只改内容 + 打 `edited` 标记，不碰 review 记录（原始 reject_reason 不丢）；`TestCase` 加 `edited/edited_at` 列 |
 
 > 后续每次修改设计时，在此表追加一行（版本、日期、主要变更）。
 

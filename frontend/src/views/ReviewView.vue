@@ -119,6 +119,63 @@ async function rejectAllInBatch(bid: string, items: CaseRecord[], reason: string
   }
   ElMessage.success(`批量拒绝完成，成功 ${success} 条`)
 }
+
+// —— 用例编辑弹窗 ——
+// 场景：有些生成结果只是文案上差几个字，直接拒绝可惜。允许四字段一起改。
+// 产品口径：编辑 = AI 一次没产出合格结果，仍算「不通过」，只是拒绝原因记为 edited，
+// 不污染 AI 可用率。可用率始终反映 AI 一次到位的能力。
+const editDialogVisible = ref(false)
+const editSaving = ref(false)
+const editForm = ref<{ id: string; batch_id: string; title: string; precondition: string; steps: string; expected_result: string }>({
+  id: '', batch_id: '', title: '', precondition: '', steps: '', expected_result: '',
+})
+
+function openEditDialog(c: CaseRecord, bid: string) {
+  editForm.value = {
+    id: c.id,
+    batch_id: bid,
+    title: c.title || '',
+    precondition: c.precondition || '',
+    // steps 可能是数组（老的 GeneratedTestCase 结构）或字符串，统一转成字符串给 textarea 用
+    steps: Array.isArray(c.steps) ? (c.steps as unknown[]).map(String).join('\n') : (c.steps || ''),
+    expected_result: c.expected_result || '',
+  }
+  editDialogVisible.value = true
+}
+
+async function saveEdit() {
+  if (!editForm.value.title.trim()) {
+    ElMessage.warning('标题不能为空')
+    return
+  }
+  editSaving.value = true
+  try {
+    const updated = await generationApi.updateCase(editForm.value.id, {
+      title: editForm.value.title,
+      precondition: editForm.value.precondition,
+      steps: editForm.value.steps,
+      expected_result: editForm.value.expected_result,
+    })
+    const items = batchItems.value[editForm.value.batch_id]
+    const c = items?.find(x => x.id === editForm.value.id)
+    if (c) {
+      c.title = updated.title
+      c.precondition = updated.precondition
+      c.steps = updated.steps
+      c.expected_result = updated.expected_result
+      c.edited = updated.edited
+      c.edited_at = updated.edited_at
+      // 编辑只改内容，不碰 review 记录——原始 reject_reason（如 context_missing）保留不丢
+      // 可用率不受影响，导出时前端可辨认 edited=True 来包含补全后的用例
+    }
+    ElMessage.success('已保存，编辑标记已记录')
+    editDialogVisible.value = false
+  } catch (e: any) {
+    ElMessage.error(e?.message || '保存失败')
+  } finally {
+    editSaving.value = false
+  }
+}
 </script>
 
 <template>
@@ -172,10 +229,12 @@ async function rejectAllInBatch(bid: string, items: CaseRecord[], reason: string
           <div v-else v-for="c in batch.items" :key="c.id" class="review-item" :class="{ approved: c.review?.status === 'approved', rejected: c.review?.status === 'rejected' }">
             <div class="ri-header">
               <span class="ri-title">{{ c.title }}</span>
+              <el-tag v-if="c.edited" size="small" type="warning" effect="plain" style="margin-right:4px">已编辑</el-tag>
               <el-tag v-if="c.review?.status === 'approved'" type="success" size="small">✓</el-tag>
               <el-tag v-else-if="c.review?.status === 'rejected'" type="danger" size="small">✗ {{ rejectReasons.find(r => r.value === c.review?.reject_reason)?.label || '' }}</el-tag>
               <template v-else>
                 <el-button size="small" type="success" @click="approveCase(c.id, batch.batch_id)" style="margin-left:8px">通过</el-button>
+                <el-button size="small" @click="openEditDialog(c, batch.batch_id)" style="margin-left:4px">编辑</el-button>
                 <el-popover placement="bottom" :width="200" trigger="click">
                   <template #reference>
                     <el-button size="small" type="danger">不可用</el-button>
@@ -183,6 +242,8 @@ async function rejectAllInBatch(bid: string, items: CaseRecord[], reason: string
                   <el-button v-for="r in rejectReasons" :key="r.value" size="small" style="margin:2px" @click="rejectCase(c.id, batch.batch_id, r.value)">{{ r.label }}</el-button>
                 </el-popover>
               </template>
+              <!-- 已通过或已拒绝的用例也允许编辑；编辑不改 review 状态，只改内容 -->
+              <el-button v-if="c.review" size="small" text @click="openEditDialog(c, batch.batch_id)" style="margin-left:4px">编辑</el-button>
             </div>
             <div class="ri-body">
               <div v-if="c.precondition" class="ri-line">前置：{{ c.precondition }}</div>
@@ -193,6 +254,28 @@ async function rejectAllInBatch(bid: string, items: CaseRecord[], reason: string
       </el-collapse>
     </div>
   </div>
+
+  <!-- 编辑用例弹窗 -->
+  <el-dialog v-model="editDialogVisible" title="编辑用例" width="600px" :close-on-click-modal="false">
+    <el-form label-position="top" size="small">
+      <el-form-item label="标题">
+        <el-input v-model="editForm.title" placeholder="用例标题" :disabled="editSaving" />
+      </el-form-item>
+      <el-form-item label="前置条件">
+        <el-input v-model="editForm.precondition" placeholder="前置条件（可选）" :disabled="editSaving" />
+      </el-form-item>
+      <el-form-item label="测试步骤">
+        <el-input v-model="editForm.steps" type="textarea" :rows="4" placeholder="每行一步" :disabled="editSaving" />
+      </el-form-item>
+      <el-form-item label="预期结果">
+        <el-input v-model="editForm.expected_result" type="textarea" :rows="3" placeholder="预期结果" :disabled="editSaving" />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="editDialogVisible = false" :disabled="editSaving">取消</el-button>
+      <el-button type="primary" @click="saveEdit" :loading="editSaving">保存</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>

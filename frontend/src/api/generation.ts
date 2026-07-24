@@ -49,6 +49,10 @@ export interface CaseRecord extends TestCase {
   batch_id?: string | null
   req_text?: string | null
   created_at?: string
+  // 审核阶段被人工微调过的用例会打上 edited=true，前端用它挂一个「已编辑」小 tag，
+  // 也让统计口径区分「AI 直接可用」和「AI+人工微调后可用」。
+  edited?: boolean
+  edited_at?: string | null
   review?: {
     status: 'approved' | 'rejected'
     reject_reason?: string | null
@@ -146,6 +150,9 @@ export const generationApi = {
   listBatches() { return client.get<any, BatchSummary[]>('/cases/batches') },
   reviewCase(caseId: string, data: { status: 'approved' | 'rejected'; reject_reason?: string }) {
     return client.post<any, { status: string }>(`/cases/${caseId}/review`, data)
+  },
+  updateCase(caseId: string, data: { title?: string; precondition?: string | null; steps?: string | null; expected_result?: string | null }) {
+    return client.patch<any, CaseRecord>(`/cases/${caseId}`, data)
   },
   exportCases(cases: CaseRecord[] | GeneratedTestCase[]) {
     return client.post<any, Blob>('/cases/export', { cases }, { responseType: 'blob' })

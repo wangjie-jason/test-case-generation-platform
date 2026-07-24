@@ -25,6 +25,7 @@
 | 需求补全       | POST /generate/clarify，LLM 结合知识库补全简略需求为结构化 Markdown，可编辑确认            | ✓    |
 | 429 处理       | 限额/限流不重试直接报错，5xx 服务端抖动保留指数退避重试                                    | ✓    |
 | 死代码清理     | 删除无人调用的 POST /generate、/generate/stream、GenerateResponse 及相关非流式函数         | ✓    |
+| 用例编辑       | 审核阶段可微调 title/precondition/steps/expected_result，只改内容不碰 review 状态（保留原 reject_reason 信号），加 `edited` 标记 | ✓    |
 
 ## Context
 
