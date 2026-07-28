@@ -106,11 +106,17 @@ async function consumeSse(
     for (const part of parts) {
       const line = part.split('\n').find((l) => l.startsWith('data: '))
       if (!line) continue
+      let event: GenerateStreamEvent
       try {
-        onEvent(JSON.parse(line.slice(6)) as GenerateStreamEvent)
+        event = JSON.parse(line.slice(6)) as GenerateStreamEvent
       } catch {
         // 忽略无法解析的片段
+        continue
       }
+      // onEvent 可能通过 throw 通知上层（error 事件），必须放在 JSON.parse 的
+      // try/catch 之外——否则这个有意的抛出会被当成"解析失败"吞掉，前端就既不
+      // 提示成功也不提示失败。
+      onEvent(event)
     }
   }
 }
@@ -151,12 +157,12 @@ export const generationApi = {
   reviewCase(caseId: string, data: { status: 'approved' | 'rejected'; reject_reason?: string }) {
     return client.post<any, { status: string }>(`/cases/${caseId}/review`, data)
   },
-  updateCase(caseId: string, data: { title?: string; precondition?: string | null; steps?: string | null; expected_result?: string | null }) {
+  updateCase(caseId: string, data: { title?: string; priority?: string | null; precondition?: string | null; steps?: string | null; expected_result?: string | null }) {
     return client.patch<any, CaseRecord>(`/cases/${caseId}`, data)
   },
   // 审核时手动插入用例。传前后两条 case 的 id 作为锚点，服务端算 sort_order 中点。
   // 首/末尾插入时只传一侧即可；都不传等价于批次末尾追加。
-  createCase(data: { batch_id: string; title: string; precondition?: string | null; steps?: string | null; expected_result?: string | null; prev_case_id?: string | null; next_case_id?: string | null }) {
+  createCase(data: { batch_id: string; title: string; priority?: string | null; precondition?: string | null; steps?: string | null; expected_result?: string | null; prev_case_id?: string | null; next_case_id?: string | null }) {
     return client.post<any, CaseRecord>('/cases', data)
   },
   exportCases(cases: CaseRecord[] | GeneratedTestCase[]) {
