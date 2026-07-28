@@ -13,6 +13,7 @@
 | v0.8 | 2026-07-15 | SSE 新增 `knowledge` 事件：检索结束后立即推送命中知识明细，前端不用等生成/评审完成即可展示；`complete` 仍带同字段作为断线重连兜底                                                                                        |
 | v0.9 | 2026-07-22 | PRD 导入支持飞书链接（Wiki 节点 / docx / 旧 doc），Docx 内表格转 GFM Markdown 保留结构；`PrdDocument` 新增 `source_type` / `source_ref`，按 obj_token 覆盖去重                                                            |
 | v0.10 | 2026-07-24 | 审核阶段允许人工微调用例文案：新增 `PATCH /cases/{id}`，可改 title/precondition/steps/expected_result；编辑只改内容 + 打 `edited` 标记，不碰 review 记录（原始 reject_reason 不丢）；`TestCase` 加 `edited/edited_at` 列 |
+| v0.11 | 2026-07-28 | LLM 输出解析分级容错：合法空结果（`{"cases": []}`）透传原因而非「格式错误，请重试」；截断输出逐条抢救；思考无正文提示调参                                                    |
 
 > 后续每次修改设计时，在此表追加一行（版本、日期、主要变更）。
 
@@ -264,6 +265,7 @@ VIP免运费 | user_level='vip' → freight=0 | 硬规则   | 订单模块 | PRD
 #### 模型调用容错
 
 - LLM 调用对 **429（限流/额度超限）不重试**，立即返回明确提示（重试无益，避免白等）；对 **502/503/504（服务端瞬时抖动）保留指数退避重试**（最多 3 次，2/4/8 秒，遵循 `Retry-After`）。
+- **输出解析分级容错**：用例解析（`_parse_cases`）区分三类失败并给出各自可行动的提示，不再笼统报「格式错误，请重试」——① 只输出思考未产出正文 → 提示调低 `reasoning_effort` 或调大 `max_tokens`；② 被 `max_tokens` 截断的未闭合 JSON → 逐个抢救已完整的用例保住结果；③ 模型合法返回空结果（`{"cases": []}`，多因需求无可测功能点）→ 从 `gaps`/`coverage.gaps` 提取原因透传给用户，引导补充需求描述。
 
 ---
 

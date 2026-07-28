@@ -283,7 +283,13 @@ def _parse_cases(raw: str) -> list[dict]:
     array_cases = _extract_first_array(raw)
     if array_cases is not None:
         return array_cases
-    # 前面三条路径都失败，通常是响应被 max_tokens 截断导致 JSON 未闭合。
+    # 合法空结果：模型正确判定"无可测内容"，返回了 {"cases": []} 并在 gaps 里说明原因
+    # （典型：需求过于简单/无功能点）。这不是格式错误，把原因透传给用户，别误报"请重试"。
+    empty_reason = _empty_result_reason(raw)
+    if empty_reason is not None:
+        logger.info("LLM 判定无可测内容，未生成用例：%s", empty_reason)
+        return [{"error": empty_reason}]
+    # 前面几条路径都失败，通常是响应被 max_tokens 截断导致 JSON 未闭合。
     # 用 raw_decode 逐个抓取已闭合的 case 对象，保住已经完整生成的部分，避免整批丢失。
     salvaged = _salvage_truncated_cases(raw)
     if salvaged:
@@ -296,6 +302,29 @@ def _parse_cases(raw: str) -> list[dict]:
         len(raw), raw[:200], raw[-200:] if len(raw) > 200 else "",
     )
     return [{"error": "模型输出格式错误，请重试"}]
+
+
+def _empty_result_reason(raw: str) -> str | None:
+    """识别"模型合法地判定无可测内容"的空结果，返回面向用户的原因说明。
+
+    模型对无功能点的需求（如"哈哈哈"）会正确返回 {"cases": [], "coverage": {"gaps": [...]}}
+    这类空数组结果。此前解析器只认"含 title 的非空数组"，会把这种情况误报成"格式错误，请重试"，
+    误导用户以为是系统故障。这里在解析末端兜底：只有当 raw 是合法 JSON 对象、且 cases 显式为空数组
+    时才判定为空结果（返回非 None），从 gaps / coverage.gaps 提取原因；无法确认则返回 None，
+    交回上层继续走截断抢救等后续路径。
+    """
+    parsed = _parse_json_object(raw)
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("cases"), list) or parsed["cases"]:
+        return None
+    gaps = parsed.get("gaps")
+    if not isinstance(gaps, list) or not gaps:
+        coverage = parsed.get("coverage")
+        gaps = coverage.get("gaps") if isinstance(coverage, dict) else None
+    if isinstance(gaps, list) and gaps:
+        reason = "；".join(str(g) for g in gaps if g)
+        if reason:
+            return f"未生成用例：{reason}"
+    return "未生成用例：模型判定该需求无可提取的可测功能点，请补充更明确的功能描述后重试"
 
 
 def _salvage_truncated_cases(raw: str) -> list[dict]:
