@@ -25,6 +25,10 @@ async def persist_cases(db, cases: list[dict], batch_name: str | None, requireme
     batch_id = str(_uuid.uuid4())
     created = []
     for c in cases:
+        # 只落库真正的用例：跳过无标题占位和 error 提示对象（如"模型只思考未输出"），
+        # 否则历史里会出现一条 title 为空、展开无内容的脏记录。
+        if not c.get("title") or c.get("error"):
+            continue
         steps = c.get("steps", "")
         if isinstance(steps, list):
             steps = json.dumps(steps, ensure_ascii=False)
