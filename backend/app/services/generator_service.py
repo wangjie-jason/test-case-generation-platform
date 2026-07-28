@@ -53,6 +53,14 @@ class GeneratorService:
             full_output += chunk; yield {"type": "chunk", "text": chunk}
 
         cases = _parse_cases(full_output)
+        # 没有任何有效用例（解析失败 / 模型合法空结果 / 只思考未输出）：这不是"成功生成 0 条"，
+        # 而是一次失败。作为 error 事件抛给前端并 return——既让前端显示明确原因（而非"成功，共 1 条"），
+        # 又因为不 emit complete，task_service 不会把 error 占位用例落库污染历史。
+        if not _has_valid_cases(cases):
+            reason = next((c.get("error") for c in cases if c.get("error")), None) \
+                or "未生成任何有效用例，请补充更明确的需求描述后重试"
+            yield {"type": "error", "message": reason}
+            return
         yield {"type": "progress", "stage": "validating", "message": "正在校验..."}
         warnings = await ValidationService.validate_cases(db, cases)
 
