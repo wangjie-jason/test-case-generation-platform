@@ -104,7 +104,7 @@ class LLMService:
         messages = self._build_messages(system_content, user_content)
 
         timeout = httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=15.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             for attempt in range(_MAX_RETRIES + 1):
                 # 把 httpx 的超时/网络异常转成携带中文提示的 LLMServiceError。
                 # 这层转换过去只在非流式 generate 里有；如今 generate 也走本方法，
