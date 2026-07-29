@@ -110,7 +110,7 @@ class ParserService:
             })
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
                 response = await client.post(
                     f"{settings.LLM_BASE_URL}/chat/completions",
                     headers={
