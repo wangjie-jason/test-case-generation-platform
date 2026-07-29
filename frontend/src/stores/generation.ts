@@ -6,6 +6,15 @@ import { kbApi } from '@/api/knowledge'
 import type { KnowledgeBase } from '@/types/project'
 import type { GeneratedTestCase } from '@/types/testCase'
 
+// 单个模块（agent）的前端状态：每个并发生成的模块对应一张卡片。
+interface AgentState {
+  index: number
+  module: string
+  status: 'running' | 'done' | 'failed'
+  streamText: string        // 该 agent 的实时原始流（生成中展示）
+  cases: GeneratedTestCase[] // 完成后解析好的用例（完成后展示，替代流文本）
+}
+
 // 单个生成任务的前端状态。多个任务并行时各自独立，互不影响。
 interface TaskState {
   taskId: string
@@ -13,6 +22,8 @@ interface TaskState {
   status: 'running' | 'done' | 'error'
   genProgress: string
   streamText: string
+  modules: string[]
+  agents: AgentState[]
   cases: GeneratedTestCase[]
   knowledgeCounts: Record<string, number>
   knowledgeMatches: KnowledgeMatches
@@ -26,7 +37,7 @@ function newTaskState(taskId: string, title: string): TaskState {
   // 表现就是进度条永远停在「正在准备」、流式文本不刷新。
   return reactive({
     taskId, title, status: 'running',
-    genProgress: '正在准备...', streamText: '',
+    genProgress: '正在准备...', streamText: '', modules: [], agents: [],
     cases: [], knowledgeCounts: {}, knowledgeMatches: {}, validationWarnings: [],
   }) as TaskState
 }
@@ -64,6 +75,8 @@ export const useGenerationStore = defineStore('generation', () => {
   const current = computed<TaskState | null>(() => activeTaskId.value ? tasks.get(activeTaskId.value) ?? null : null)
   const genProgress = computed(() => current.value?.genProgress ?? '')
   const streamText = computed(() => current.value?.streamText ?? '')
+  const modules = computed(() => current.value?.modules ?? [])
+  const agents = computed(() => current.value?.agents ?? [])
   const cases = computed(() => current.value?.cases ?? [])
   const knowledgeCounts = computed(() => current.value?.knowledgeCounts ?? {})
   const knowledgeMatches = computed(() => current.value?.knowledgeMatches ?? {})
@@ -112,6 +125,25 @@ export const useGenerationStore = defineStore('generation', () => {
       if (event.stage === 'supplementing') t.streamText = ''
     } else if (event.type === 'chunk') {
       t.streamText += event.text
+    } else if (event.type === 'modules') {
+      // 展示拆分出的模块清单，让用户看到本次生成覆盖了哪些模块。
+      t.modules = event.modules || []
+    } else if (event.type === 'module_start') {
+      // 某 agent 开始跑：建卡或激活已有卡（重连重放时可能重复收到，按 index 幂等）。
+      const a = t.agents.find(x => x.index === event.index)
+      if (a) { a.status = 'running' }
+      else { t.agents.push({ index: event.index, module: event.module, status: 'running', streamText: '', cases: [] }) }
+    } else if (event.type === 'module_chunk') {
+      // 该 agent 的实时流：追加到它自己的缓冲区，不与其它 agent 交错。
+      const a = t.agents.find(x => x.index === event.index)
+      if (a) a.streamText += event.text
+    } else if (event.type === 'module_done') {
+      // 该 agent 完成：置完成态，卡片改为展示解析好的用例列表。
+      const a = t.agents.find(x => x.index === event.index)
+      if (a) { a.status = 'done'; a.cases = event.cases || [] }
+    } else if (event.type === 'module_failed') {
+      const a = t.agents.find(x => x.index === event.index)
+      if (a) a.status = 'failed'
     } else if (event.type === 'knowledge') {
       // 检索一结束就展示命中的知识，不用等 complete。
       t.knowledgeCounts = event.knowledge_used || {}
@@ -241,6 +273,8 @@ export const useGenerationStore = defineStore('generation', () => {
     isGenerating,
     genProgress,
     streamText,
+    modules,
+    agents,
     cases,
     knowledgeCounts,
     knowledgeMatches,

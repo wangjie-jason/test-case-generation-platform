@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 实施计划
 
-> 版本 v1.3 | 更新 2026-07-22 | 需求补全 + 并行生成 + 多人隔离 + 飞书 PRD 导入
+> 版本 v1.4 | 更新 2026-07-29 | 模块并行生成 + agent 卡片分区流式 + 评审分批 + 需求补全 + 多人隔离 + 飞书 PRD 导入
 
 ## 当前状态
 - **架构变更**: Project/Module → KnowledgeBase（知识库为核心，卡片式管理）
@@ -21,6 +21,7 @@
 | 生成任务       | 后台任务(asyncio)+独立DB会话，SSE事件缓存重放，刷新/切页后断点续看，全局页头「生成中」入口 | ✓    |
 | 评审-删除-补充 | 生成后 LLM 以测试专家身份逐条判定保留/删除，定向补充缺口，不再整批改写                     | ✓    |
 | 并行生成       | store 改为多任务 Map，可同时发起多个生成互不阻塞；前端任务列表可切换查看                   | ✓    |
+| 模块并行+分区流式 | 大需求按模块并发生成（并发上限+错峰防限流），模块内真流式，前端按 agent 卡片分区展示各自的流（可多开，完成后换用例列表）；评审分批并发防超时 | ✓    |
 | 多人隔离       | localStorage 匿名 client_id，后端 owner_id 过滤 active 任务，不同浏览器互不干扰            | ✓    |
 | 需求补全       | POST /generate/clarify，LLM 结合知识库补全简略需求为结构化 Markdown，可编辑确认            | ✓    |
 | 429 处理       | 限额/限流不重试直接报错，5xx 服务端抖动保留指数退避重试                                    | ✓    |
@@ -135,8 +136,13 @@
 ## SSE 流式生成协议
 
 ```
-event: progress  → {stage: "retrieving"|"constructing"|"generating"|"validating"|"reviewing"|"supplementing", message: "..."}
-event: chunk     → {text: "(LLM 增量输出)"}
+event: progress  → {stage: "retrieving"|"constructing"|"splitting"|"generating"|"validating"|"reviewing"|"supplementing", message: "..."}
+event: chunk     → {text: "(LLM 增量输出)"}                                # 单批路径 / 补充阶段的流式文本
+event: modules       → {modules: ["模块A", "模块B", ...]}                  # 模块拆分完成后推送清单
+event: module_start  → {index, module}                                    # 某模块(agent)开始生成
+event: module_chunk  → {index, text}                                      # 该模块的实时流，前端按 index 分区归档
+event: module_done   → {index, module, cases: [...]}                      # 该模块完成，带解析好的用例
+event: module_failed → {index, module}                                    # 该模块失败（跳过，不中断整批）
 event: knowledge → {knowledge_used: {...}, knowledge_matches: {...}}    # 检索结束后立即推送，让前端不等生成完成也能显示命中知识
 event: complete  → {cases: [...], knowledge_used: {...}, knowledge_matches: {...}, validation_warnings: [...]}
 event: error     → {message: "..."}

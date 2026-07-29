@@ -30,6 +30,19 @@ export type GenerateStreamEvent =
   | { type: 'progress'; stage: string; message: string }
   | { type: 'chunk'; text: string }
   | {
+      // 模块拆分完成后推送拆出的模块清单，让前端展示「本次拆成了哪些模块」。
+      type: 'modules'
+      modules: string[]
+    }
+  // 每个模块（agent）开始生成：前端据 index 建/激活对应 agent 卡片。
+  | { type: 'module_start'; index: number; module: string }
+  // 某模块的实时流式文本：按 index 归档到对应 agent 卡片的流缓冲区。
+  | { type: 'module_chunk'; index: number; text: string }
+  // 某模块生成完成：带该模块解析出的用例，前端把卡片从流式文本切换为用例列表。
+  | { type: 'module_done'; index: number; module: string; cases: GeneratedTestCase[] }
+  // 某模块生成失败：卡片标记为失败态。
+  | { type: 'module_failed'; index: number; module: string }
+  | {
       // 检索完成后立即推送，让前端在等生成时就能显示命中的知识。
       // complete 事件里也会带同样两个字段，用于重连兜底。
       type: 'knowledge'

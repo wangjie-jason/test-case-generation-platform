@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     # 单批被 max_tokens 截断后，最多自动续写几轮（防止极端情况下无限续写）。
     LLM_MAX_CONTINUATIONS: int = 3
 
+    # 模块并行生成：最多同时向 LLM 发起几个模块的生成请求。
+    # 受套餐并发额度限制，出现 429 时应调小；配合 429 退避重试兜底。
+    LLM_MODULE_CONCURRENCY: int = 5
+    # 每个模块的启动错峰间隔（秒）：并发启动时逐个延迟，避免同一瞬间大量请求
+    # 撞到限流上限（RPS 突刺）。第 n 个模块延迟 n * 该值后再发起。
+    LLM_MODULE_STAGGER_DELAY: float = 0.5
+    # 评审分批：用例数超过此值时，把评审拆成多段并发进行，避免整批 prompt 过长
+    # 导致模型思考过久撞 read 超时（评审是单次大调用，最易超时）。
+    LLM_REVIEW_BATCH_SIZE: int = 300
+
     # 向量检索阈值（L2 距离）：最小结果超过此值视为"完全不相关"，整批过滤。
     VECTOR_MIN_DISTANCE_THRESHOLD: float = 12.0
     # 在"有相关性"的前提下，保留距离不超过「最小距离 + 此增量」的结果。

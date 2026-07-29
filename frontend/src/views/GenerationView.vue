@@ -11,9 +11,25 @@ const store = useGenerationStore()
 const {
   kbs, selectedKbs, requirementText, batchName, inputMode, isParsing, parsedFilename,
   tabActive, isGenerating, cases, genProgress, streamText, knowledgeCounts,
-  knowledgeMatches, taskList, activeTaskId, runningCount,
+  knowledgeMatches, taskList, activeTaskId, runningCount, modules, agents,
   clarifiedText, isClarifying, historyDirty,
 } = storeToRefs(store)
+
+// 展开的 agent 卡片（可多开）。每个 agent 首次出现时自动展开一次，之后完全尊重用户的
+// 手动折叠/展开——用 autoExpanded 记录「已自动展开过的 index」，避免流式 chunk 不断触发
+// watch 把用户刚收起的卡片又强行展开（收不起来的根因）。
+const openAgents = ref<number[]>([])
+const autoExpanded = new Set<number>()
+watch(agents, (list) => {
+  for (const a of list) {
+    if (!autoExpanded.has(a.index)) {
+      autoExpanded.add(a.index)
+      if (!openAgents.value.includes(a.index)) {
+        openAgents.value = [...openAgents.value, a.index]
+      }
+    }
+  }
+}, { deep: true })
 
 // 历史记录：先拉批次汇总渲染折叠卡片，点开某批时再懒加载该批全量用例。
 // 老实现是一次拉 /cases（写死 200 上限），大批次会被截断——现在按 batch_id 精确拉。
@@ -263,8 +279,48 @@ async function downloadBatch(batch: BatchSummary) {
             <div class="results-toolbar"><span>生成结果</span><el-button v-if="cases.length" size="small" type="success" @click="downloadCases">下载 Excel</el-button></div>
           </template>
           <el-alert v-if="isGenerating" :title="genProgress || '生成中...'" type="info" :closable="false" />
-          <div v-if="isGenerating && streamText" class="stream-output">{{ streamText }}</div>
-          <el-tag v-if="kSummary !== '无'" size="small" type="info" style="margin-bottom:8px">引用知识：{{ kSummary }}</el-tag>
+          <div v-if="modules.length" class="module-list">
+            <span class="module-list-label">拆分模块（{{ modules.length }}）：</span>
+            <el-tag v-for="(m, i) in modules" :key="i" size="small" effect="plain" class="module-tag">{{ m }}</el-tag>
+          </div>
+
+          <!-- Agent 卡片区：每个模块一张卡，可同时展开多张各看各的流。
+               生成中展示该 agent 的实时原始流；完成后替换为解析好的用例列表。 -->
+          <div v-if="agents.length" class="agent-area">
+            <el-collapse v-model="openAgents">
+              <el-collapse-item v-for="a in agents" :key="a.index" :name="a.index">
+                <template #title>
+                  <el-icon v-if="a.status === 'running'" class="spin agent-ico"><Loading /></el-icon>
+                  <span v-else-if="a.status === 'done'" class="agent-ico done">✓</span>
+                  <span v-else class="agent-ico failed">✕</span>
+                  <span class="agent-name">{{ a.module }}</span>
+                  <span class="agent-meta">
+                    {{ a.status === 'running' ? '生成中…' : a.status === 'failed' ? '失败' : `${a.cases.length} 条` }}
+                  </span>
+                </template>
+                <!-- 完成：展示解析好的用例列表 -->
+                <template v-if="a.status === 'done'">
+                  <div v-if="!a.cases.length" class="agent-empty">该模块未产出用例</div>
+                  <div v-for="(c, ci) in a.cases" :key="ci" class="agent-case">
+                    <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:6px">{{ c.priority }}</el-tag>
+                    <strong>{{ c.title }}</strong>
+                    <div v-if="c.precondition" class="agent-case-line">前置：{{ c.precondition }}</div>
+                    <div v-if="c.steps" class="agent-case-line" style="white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
+                    <div v-if="c.expected_result" class="agent-case-line" style="color:#67C23A">预期：{{ c.expected_result }}</div>
+                  </div>
+                </template>
+                <!-- 失败 -->
+                <div v-else-if="a.status === 'failed'" class="agent-empty">该模块生成失败，已跳过（其余模块不受影响）</div>
+                <!-- 生成中：展示实时原始流 -->
+                <div v-else class="stream-output">{{ a.streamText || '正在等待模型输出…' }}</div>
+              </el-collapse-item>
+            </el-collapse>
+          </div>
+
+          <!-- 单批（无模块拆分）时的全局流式兜底 -->
+          <div v-if="isGenerating && streamText && !agents.length" class="stream-output">{{ streamText }}</div>
+          <el-tag v-if="kSummary !== '无'" size="small" type="info" style="margin:8px 0">引用知识：{{ kSummary }}</el-tag>
+          <div v-if="cases.length" class="final-cases-title">最终用例（评审+补充后，共 {{ cases.length }} 条）</div>
           <div v-for="(c, idx) in cases" :key="idx" style="margin-bottom:8px">
             <el-collapse>
               <el-collapse-item>
@@ -330,6 +386,19 @@ async function downloadBatch(batch: BatchSummary) {
 .label { font-size: 13px; color: #606266; margin-bottom: 4px; }
 .results-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .stream-output { margin-top: 10px; padding: 10px 12px; background: #1e1e1e; color: #d4d4d4; border-radius: 6px; font-family: 'SFMono-Regular', Menlo, Consolas, monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow-y: auto; }
+.module-list { margin: 8px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.module-list-label { font-size: 13px; color: #606266; font-weight: 600; }
+.module-tag { margin: 0; }
+.agent-area { margin: 10px 0; }
+.agent-ico { flex-shrink: 0; width: 18px; text-align: center; margin-right: 6px; }
+.agent-ico.done { color: #67C23A; font-weight: bold; }
+.agent-ico.failed { color: #F56C6C; font-weight: bold; }
+.agent-name { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-meta { flex-shrink: 0; font-size: 12px; color: #909399; margin-left: 8px; }
+.agent-empty { font-size: 13px; color: #909399; padding: 6px 0; }
+.agent-case { padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: 13px; }
+.agent-case-line { color: #606266; margin-top: 2px; }
+.final-cases-title { font-size: 14px; font-weight: 600; color: #303133; margin: 12px 0 8px; }
 .match-group { margin-bottom: 14px; }
 .match-group-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px; font-weight: 600; color: #303133; }
 .match-item { padding: 8px 10px; margin-bottom: 8px; border: 1px solid #ebeef5; border-radius: 8px; background: #fafafa; }

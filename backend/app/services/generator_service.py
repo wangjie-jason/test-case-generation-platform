@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -71,18 +72,76 @@ class GeneratorService:
 
         if modules:
             total = len(modules)
-            for idx, module in enumerate(modules):
-                yield {"type": "progress", "stage": "generating", "message": f"正在生成模块 {idx+1}/{total}: {module}"}
-                batch = await _generate_one_batch(
-                    llm, base_system, requirement_text, retrieval, historical_cases,
-                    module_focus=module, existing_titles=all_titles,
-                )
-                if batch:
-                    logger.info("模块[%s]生成 %d 条用例", module, len(batch))
-                    # 把本批用例以 chunk 事件推给前端（流式展示）
-                    for c in batch:
-                        yield {"type": "chunk", "text": json.dumps(c, ensure_ascii=False)}
-                    all_cases.extend(batch)
+            # 把拆分出的模块清单推给前端，让用户看到「本次拆成了哪些模块」，
+            # 而不是只显示"正在分析模块结构..."后就闷头生成（此前无从得知拆了什么）。
+            yield {"type": "modules", "modules": modules}
+            yield {"type": "progress", "stage": "generating",
+                   "message": f"已拆分为 {total} 个模块，开始并行生成：{('、'.join(modules))[:120]}"}
+            # 模块并行生成：受 LLM_MODULE_CONCURRENCY 并发上限约束，并按
+            # LLM_MODULE_STAGGER_DELAY 错峰启动，避免瞬间大量请求撞到套餐限流。
+            # 每个模块用独立的 LLMService 实例——因为续写兜底依赖实例上的
+            # last_finish_reason 状态，共享一个实例会互相覆盖导致判断错乱。
+            # 跨模块的 title 去重不再实时共享（并发下无法安全共享可变列表），
+            # 改由全部完成后的 _dedup_by_title 统一按归一化 title 精确去重。
+            sem = asyncio.Semaphore(max(1, settings.LLM_MODULE_CONCURRENCY))
+            stagger = max(0.0, settings.LLM_MODULE_STAGGER_DELAY)
+            # 汇流队列：各模块并发跑，把带 module_index 的事件（开始/流式chunk/完成/失败）
+            # 推入这个队列，由主生成器单点取出并 yield。这样多 agent 的实时流不会在
+            # yield 层交错错乱，且每个事件都带模块下标，前端可按 agent 分区展示各自的流。
+            event_q: asyncio.Queue = asyncio.Queue()
+
+            async def _run_module(idx: int, module: str) -> None:
+                # 错峰：第 idx 个模块延迟 idx*stagger 秒再启动，把并发启动的
+                # 请求突刺摊平成平滑曲线，进一步降低 429 概率。
+                if stagger and idx:
+                    await asyncio.sleep(idx * stagger)
+                async with sem:
+                    await event_q.put({"type": "module_start", "index": idx, "module": module})
+
+                    async def _on_chunk(text: str) -> None:
+                        # 该模块的实时流：带 index，前端归档到对应 agent 卡片。
+                        await event_q.put({"type": "module_chunk", "index": idx, "text": text})
+
+                    try:
+                        batch = await _generate_one_batch(
+                            LLMService(), base_system, requirement_text, retrieval, historical_cases,
+                            module_focus=module, existing_titles=[], on_chunk=_on_chunk,
+                        )
+                    except Exception:
+                        logger.exception("模块[%s]并行生成失败", module)
+                        await event_q.put({"type": "module_failed", "index": idx, "module": module})
+                        return
+                    await event_q.put({"type": "module_done", "index": idx, "module": module, "cases": batch})
+
+            tasks = [asyncio.create_task(_run_module(i, m)) for i, m in enumerate(modules)]
+
+            # 单点消费队列并 yield，直到所有模块都产出了终态（done/failed）。
+            done_count = 0
+            while done_count < total:
+                ev = await event_q.get()
+                etype = ev["type"]
+                if etype == "module_start":
+                    yield ev
+                elif etype == "module_chunk":
+                    yield ev
+                elif etype == "module_failed":
+                    done_count += 1
+                    yield {"type": "module_failed", "index": ev["index"], "module": ev["module"]}
+                    yield {"type": "progress", "stage": "generating",
+                           "message": f"模块生成进度 {done_count}/{total}（模块「{ev['module']}」失败已跳过）"}
+                elif etype == "module_done":
+                    done_count += 1
+                    batch = ev.get("cases") or []
+                    if batch:
+                        logger.info("模块[%s]生成 %d 条用例", ev["module"], len(batch))
+                        all_cases.extend(batch)
+                    # 把该模块解析出的用例随完成事件下发，前端用它把卡片从「流式文本」
+                    # 切换为解析好的用例列表。
+                    yield {"type": "module_done", "index": ev["index"], "module": ev["module"], "cases": batch}
+                    yield {"type": "progress", "stage": "generating",
+                           "message": f"模块生成进度 {done_count}/{total}：{ev['module']}"}
+            # 兜底：确保所有任务已结束（正常情况下 done_count 达标时它们都已 return）。
+            await asyncio.gather(*tasks, return_exceptions=True)
         else:
             # 无模块分批：单批生成 + 续写兜底
             yield {"type": "progress", "stage": "generating", "message": "AI正在生成..."}
@@ -240,13 +299,15 @@ async def _generate_one_batch(
     llm, base_system: str, requirement_text: str, retrieval: dict,
     historical_cases: list[dict], module_focus: str | None,
     existing_titles: list[str], user_content: str | None = None,
+    on_chunk=None,
 ) -> list[dict]:
     """生成一批用例，内含「续写式」兜底：撞满 max_tokens 就带着已有 title 续写，
     循环到 finish_reason != length 或达到 LLM_MAX_CONTINUATIONS 上限。
 
     existing_titles 会被就地追加本批新生成的 title（跨批共享，供后续批次/续写防重复）。
     module_focus 非空时按该模块聚焦生成；user_content 显式传入时优先使用（单批路径复用）。
-    返回本批解析出的用例列表（可能为空）。
+    on_chunk 非空时，每收到一段流式文本就以其为参数调用（可为 async），供上层按模块
+    实时展示该 agent 的输出流。返回本批解析出的用例列表（可能为空）。
     """
     if user_content is None:
         _, user_content = PromptService.build(
@@ -260,7 +321,16 @@ async def _generate_one_batch(
     batch_cases: list[dict] = []
     cur_user = user_content
     for attempt in range(settings.LLM_MAX_CONTINUATIONS + 1):
-        raw = await llm.generate(base_system, cur_user)
+        # 流式收取：边收边把原始文本通过 on_chunk 推给上层展示，同时累积成整段
+        # 供后续 _parse_cases 解析。相比一次性 generate()，用户能看到 agent 实时吐字。
+        parts: list[str] = []
+        async for piece in llm.generate_stream(base_system, cur_user):
+            parts.append(piece)
+            if on_chunk is not None and piece:
+                res = on_chunk(piece)
+                if asyncio.iscoroutine(res):
+                    await res
+        raw = "".join(parts)
         cases = [c for c in _parse_cases(raw) if c.get("title") and not c.get("error")]
         # 只累加"未出现过的 title"，避免续写时模型重复吐已有用例。
         for c in cases:
@@ -352,12 +422,56 @@ def _review_prompt(cases: list[dict], warnings: list[dict]) -> str:
 
 
 async def _review_cases(llm, system: str, cases: list[dict], warnings: list[dict]) -> dict:
-    """调用 LLM 评审，返回 {reviews:[...], gaps:[...]}；失败时返回空（全部保留）。"""
+    """调用 LLM 评审，返回 {reviews:[...], gaps:[...]}；失败时返回空（全部保留）。
+
+    用例数超过 LLM_REVIEW_BATCH_SIZE 时分批并发评审，避免整批 prompt 过长撞超时。
+    每批内 _review_prompt 用局部下标（从 0 起），返回后把 review.index 加上该批的全局
+    偏移，映射回整批下标——_apply_review 依赖全局 index 定位删除项，偏移错了会误删。
+    """
+    size = max(1, settings.LLM_REVIEW_BATCH_SIZE)
+    if len(cases) <= size:
+        return await _review_one_segment(llm, system, cases, warnings, offset=0)
+
+    # 分批：按 size 切段，每段带全局偏移。warnings 里的 case_index 也是全局的，
+    # 按段过滤并回退成局部下标，保证每段 prompt 里的 #编号与该段用例对齐。
+    segments = []
+    for start in range(0, len(cases), size):
+        seg_cases = cases[start:start + size]
+        seg_warnings = [
+            {**w, "case_index": w["case_index"] - start}
+            for w in warnings
+            if isinstance(w.get("case_index"), int) and start <= w["case_index"] < start + len(seg_cases)
+        ]
+        segments.append((start, seg_cases, seg_warnings))
+
+    # 每段独立 LLMService 实例并发评审（同模块生成，避免共享 last_finish_reason）。
+    results = await asyncio.gather(
+        *[_review_one_segment(LLMService(), system, sc, sw, offset=st) for st, sc, sw in segments],
+        return_exceptions=True,
+    )
+    merged_reviews: list[dict] = []
+    merged_gaps: list[str] = []
+    for r in results:
+        if isinstance(r, dict):
+            merged_reviews.extend(r.get("reviews", []))
+            merged_gaps.extend(r.get("gaps", []))
+        else:
+            logger.warning("某评审分段失败，该段用例默认全部保留：%s", r)
+    return {"reviews": merged_reviews, "gaps": merged_gaps}
+
+
+async def _review_one_segment(llm, system: str, cases: list[dict], warnings: list[dict], offset: int) -> dict:
+    """评审单段用例，返回 {reviews, gaps}；review.index 已加上 offset 映射回全局下标。"""
     try:
         raw = await llm.generate(system, _review_prompt(cases, warnings))
         parsed = _parse_json_object(raw)
         if isinstance(parsed, dict):
-            return parsed
+            reviews = parsed.get("reviews", [])
+            if offset and isinstance(reviews, list):
+                for rv in reviews:
+                    if isinstance(rv, dict) and isinstance(rv.get("index"), int):
+                        rv["index"] += offset
+            return {"reviews": reviews if isinstance(reviews, list) else [], "gaps": parsed.get("gaps", [])}
     except Exception:
         logger.exception("用例评审失败，跳过删除与补充")
     return {"reviews": [], "gaps": []}
