@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     # 目前主要影响 DeepSeek V4 Pro/Flash 等具备"Think"模式的模型；不识别该字段的服务商会忽略。
     LLM_REASONING_EFFORT: str = ""
 
+    # ── 分批生成（避免单次响应撞满 max_tokens 被截断）──
+    # LLM_ENABLE_MODULE_SPLIT：是否先抽取【模块清单】再按模块分批生成。
+    #   True（默认）= 大需求拆成多批，每批更聚焦、更不易截断；抽出的模块 ≤1 个时自动退化为单批。
+    #   False = 关闭模块分批，只保留「续写式」兜底（撞满 max_tokens 就续写）。出问题可一键回退。
+    LLM_ENABLE_MODULE_SPLIT: bool = True
+    # 单批被 max_tokens 截断后，最多自动续写几轮（防止极端情况下无限续写）。
+    LLM_MAX_CONTINUATIONS: int = 3
+
     # 向量检索阈值（L2 距离）：最小结果超过此值视为"完全不相关"，整批过滤。
     VECTOR_MIN_DISTANCE_THRESHOLD: float = 12.0
     # 在"有相关性"的前提下，保留距离不超过「最小距离 + 此增量」的结果。
