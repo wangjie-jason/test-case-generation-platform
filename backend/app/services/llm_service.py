@@ -63,6 +63,12 @@ class LLMService:
         self.temperature = settings.LLM_TEMPERATURE
         self.max_tokens = settings.LLM_MAX_TOKENS
         self.reasoning_effort = settings.LLM_REASONING_EFFORT.strip() or None
+        # 最近一次流式生成结束时服务端上报的 finish_reason。
+        #   "stop"   = 模型自然写完
+        #   "length" = 撞满 max_tokens 被截断（续写分批的判据）
+        #   None     = 服务端未上报（部分 OpenAI-compat 服务不带该字段）
+        # 每次 generate_stream 开头重置，上层在 async-for 结束后读取。
+        self.last_finish_reason: str | None = None
 
     def _build_payload(self, messages: list[dict], stream: bool = False) -> dict:
         """构造 chat/completions 请求体；仅当配置了推理强度时才带 reasoning_effort。"""
@@ -102,6 +108,8 @@ class LLMService:
     async def generate_stream(self, system_content: str, user_content: str) -> AsyncGenerator[str, None]:
         """通过 SSE 流式生成。"""
         messages = self._build_messages(system_content, user_content)
+        # 每次调用先重置，避免上一次的 finish_reason 泄漏到本次判断。
+        self.last_finish_reason = None
 
         timeout = httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=15.0)
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
@@ -145,7 +153,13 @@ class LLMService:
                                     break
                                 try:
                                     data = json.loads(chunk)
-                                    delta = data["choices"][0].get("delta", {})
+                                    choice = data["choices"][0]
+                                    # 记录 finish_reason：多数服务在最后一个 chunk 才带非空值，
+                                    # 逐 chunk 覆盖即可拿到最终值（续写分批据此判断是否被截断）。
+                                    fr = choice.get("finish_reason")
+                                    if fr:
+                                        self.last_finish_reason = fr
+                                    delta = choice.get("delta", {})
                                     content = delta.get("content", "")
                                     if content:
                                         content_seen = True

@@ -44,52 +44,102 @@ class GeneratorService:
         km = _knowledge_matches(retrieval, historical_cases)
         yield {"type": "knowledge", "knowledge_used": kc, "knowledge_matches": km}
 
-        system_content, user_content = PromptService.build(requirement_text=requirement_text, field_dicts=retrieval["field_dicts"], business_rules=retrieval["business_rules"], state_machines=retrieval["state_machines"], term_mappings=retrieval["term_mappings"], defect_chunks=retrieval.get("defect_chunks"), prd_chunks=retrieval.get("prd_chunks"), historical_cases=historical_cases)
-
-        yield {"type": "progress", "stage": "generating", "message": "AI正在生成..."}
+        # 构造基础 system_content（含知识库上下文），后续所有 LLM 调用复用此 system。
+        base_system, _ = PromptService.build(
+            requirement_text=requirement_text, field_dicts=retrieval["field_dicts"],
+            business_rules=retrieval["business_rules"], state_machines=retrieval["state_machines"],
+            term_mappings=retrieval["term_mappings"], defect_chunks=retrieval.get("defect_chunks"),
+            prd_chunks=retrieval.get("prd_chunks"), historical_cases=historical_cases,
+        )
         llm = LLMService()
-        full_output = ""
-        async for chunk in llm.generate_stream(system_content, user_content):
-            full_output += chunk; yield {"type": "chunk", "text": chunk}
 
-        cases = _parse_cases(full_output)
+        # ── 阶段1：模块拆分（可选） ──
+        # 仅在 LLM_ENABLE_MODULE_SPLIT 开启时抽取模块清单；关闭则退化为单批续写式。
+        modules = None
+        if settings.LLM_ENABLE_MODULE_SPLIT:
+            yield {"type": "progress", "stage": "splitting", "message": "正在分析模块结构..."}
+            modules = await _extract_modules(llm, requirement_text, retrieval.get("prd_chunks"))
+            if not modules or len(modules) <= 1:
+                modules = None  # 一个模块或没有，退化为单批
+
+        # ── 阶段2：逐个模块生成（每批内部套续写兜底） ──
+        all_cases: list[dict] = []
+        # 跨批共用 title 列表，用于续写时防重复。
+        all_titles: list[str] = []
+
+        if modules:
+            total = len(modules)
+            for idx, module in enumerate(modules):
+                yield {"type": "progress", "stage": "generating", "message": f"正在生成模块 {idx+1}/{total}: {module}"}
+                batch = await _generate_one_batch(
+                    llm, base_system, requirement_text, retrieval, historical_cases,
+                    module_focus=module, existing_titles=all_titles,
+                )
+                if batch:
+                    logger.info("模块[%s]生成 %d 条用例", module, len(batch))
+                    # 把本批用例以 chunk 事件推给前端（流式展示）
+                    for c in batch:
+                        yield {"type": "chunk", "text": json.dumps(c, ensure_ascii=False)}
+                    all_cases.extend(batch)
+        else:
+            # 无模块分批：单批生成 + 续写兜底
+            yield {"type": "progress", "stage": "generating", "message": "AI正在生成..."}
+            _, user_content = PromptService.build(
+                requirement_text=requirement_text, field_dicts=retrieval["field_dicts"],
+                business_rules=retrieval["business_rules"], state_machines=retrieval["state_machines"],
+                term_mappings=retrieval["term_mappings"], defect_chunks=retrieval.get("defect_chunks"),
+                prd_chunks=retrieval.get("prd_chunks"), historical_cases=historical_cases,
+            )
+            all_cases = await _generate_one_batch(
+                llm, base_system, requirement_text, retrieval, historical_cases,
+                module_focus=None, existing_titles=all_titles,
+                user_content=user_content,
+            )
+
+        # ── 跨批去重（按 title 归一化后精确匹配） ──
+        if len(all_cases) > 1:
+            deduped = _dedup_by_title(all_cases)
+            if len(deduped) < len(all_cases):
+                logger.info("去重合并：%d → %d 条", len(all_cases), len(deduped))
+            all_cases = deduped
+
         # 没有任何有效用例（解析失败 / 模型合法空结果 / 只思考未输出）：这不是"成功生成 0 条"，
         # 而是一次失败。作为 error 事件抛给前端并 return——既让前端显示明确原因（而非"成功，共 1 条"），
         # 又因为不 emit complete，task_service 不会把 error 占位用例落库污染历史。
-        if not _has_valid_cases(cases):
-            reason = next((c.get("error") for c in cases if c.get("error")), None) \
+        if not _has_valid_cases(all_cases):
+            reason = next((c.get("error") for c in all_cases if c.get("error")), None) \
                 or "未生成任何有效用例，请补充更明确的需求描述后重试"
             yield {"type": "error", "message": reason}
             return
         yield {"type": "progress", "stage": "validating", "message": "正在校验..."}
-        warnings = await ValidationService.validate_cases(db, cases)
+        warnings = await ValidationService.validate_cases(db, all_cases)
 
         # 评审：以测试专家身份逐条判定保留/删除，不改写已生成的用例。
-        if _has_valid_cases(cases):
+        if _has_valid_cases(all_cases):
             yield {"type": "progress", "stage": "reviewing", "message": "测试专家正在评审用例..."}
-            review = await _review_cases(llm, system_content, cases, warnings)
-            kept, deleted = _apply_review(cases, review.get("reviews", []))
+            review = await _review_cases(llm, base_system, all_cases, warnings)
+            kept, deleted = _apply_review(all_cases, review.get("reviews", []))
             if _has_valid_cases(kept):
-                cases = kept
+                all_cases = kept
             else:
                 deleted = []  # 评审把用例全删了，判定不可信，全部保留
             gaps = review.get("gaps", [])
             if deleted:
-                yield {"type": "progress", "stage": "reviewing", "message": f"评审删除 {len(deleted)} 条问题用例，保留 {len(cases)} 条"}
+                yield {"type": "progress", "stage": "reviewing", "message": f"评审删除 {len(deleted)} 条问题用例，保留 {len(all_cases)} 条"}
 
             # 补充：仅针对被删场景与遗漏场景生成新用例，追加到保留的用例后。
             if deleted or gaps:
                 yield {"type": "progress", "stage": "supplementing", "message": "正在补充遗漏场景的用例..."}
                 supp_output = ""
-                async for chunk in _supplement_stream(llm, system_content, cases, deleted, gaps):
+                async for chunk in _supplement_stream(llm, base_system, all_cases, deleted, gaps):
                     supp_output += chunk; yield {"type": "chunk", "text": chunk}
                 supplements = [c for c in _parse_cases(supp_output) if c.get("title") and not c.get("error")]
                 if supplements:
-                    cases = cases + supplements
-                    yield {"type": "progress", "stage": "supplementing", "message": f"补充 {len(supplements)} 条用例，共 {len(cases)} 条"}
-            warnings = await ValidationService.validate_cases(db, cases)
+                    all_cases = all_cases + supplements
+                    yield {"type": "progress", "stage": "supplementing", "message": f"补充 {len(supplements)} 条用例，共 {len(all_cases)} 条"}
+            warnings = await ValidationService.validate_cases(db, all_cases)
 
-        yield {"type": "complete", "cases": cases, "knowledge_used": kc, "knowledge_matches": km, "validation_warnings": warnings}
+        yield {"type": "complete", "cases": all_cases, "knowledge_used": kc, "knowledge_matches": km, "validation_warnings": warnings}
 
 
 def _knowledge_matches(retrieval: dict, historical_cases: list[dict]) -> dict[str, list[dict]]:
@@ -149,6 +199,115 @@ async def _get_historical_cases(text: str, keywords: list[str], kb_ids: list[str
 
 def _has_valid_cases(cases: list[dict]) -> bool:
     return any(case.get("title") and not case.get("error") for case in cases)
+
+
+async def _extract_modules(llm, requirement_text: str, prd_chunks: list[dict] | None) -> list[str] | None:
+    """阶段1：让 LLM 抽取【模块清单】。失败或无法确认时返回 None（上层退化为单批）。
+
+    模块拆分是「优化层」，其失败绝不能阻断生成——抽取异常、解析失败、模型判定
+    覆盖不全（covers_all=false）时，一律返回 None 回退到单批续写式，只打告警日志。
+    """
+    try:
+        system, user = PromptService.build_module_split(requirement_text, prd_chunks)
+        raw = await llm.generate(system, user)
+        parsed = _parse_json_object(raw)
+        if not isinstance(parsed, dict):
+            logger.warning("模块拆分未返回合法 JSON，退化为单批生成")
+            return None
+        modules = parsed.get("modules")
+        if not isinstance(modules, list):
+            logger.warning("模块拆分结果缺少 modules 数组，退化为单批生成")
+            return None
+        # 去空、去重、保序
+        clean: list[str] = []
+        for m in modules:
+            name = str(m).strip()
+            if name and name not in clean:
+                clean.append(name)
+        # 模型自报未覆盖全部章节：模块分批可能漏用例，宁可退化为单批（单批不会漏模块）。
+        if parsed.get("covers_all") is False:
+            logger.warning("模块拆分自报未覆盖全部章节（reason=%s），退化为单批生成以防漏模块", parsed.get("reason"))
+            return None
+        return clean or None
+    except Exception:
+        logger.exception("模块拆分调用失败，退化为单批生成")
+        return None
+
+
+async def _generate_one_batch(
+    llm, base_system: str, requirement_text: str, retrieval: dict,
+    historical_cases: list[dict], module_focus: str | None,
+    existing_titles: list[str], user_content: str | None = None,
+) -> list[dict]:
+    """生成一批用例，内含「续写式」兜底：撞满 max_tokens 就带着已有 title 续写，
+    循环到 finish_reason != length 或达到 LLM_MAX_CONTINUATIONS 上限。
+
+    existing_titles 会被就地追加本批新生成的 title（跨批共享，供后续批次/续写防重复）。
+    module_focus 非空时按该模块聚焦生成；user_content 显式传入时优先使用（单批路径复用）。
+    返回本批解析出的用例列表（可能为空）。
+    """
+    if user_content is None:
+        _, user_content = PromptService.build(
+            requirement_text=requirement_text, field_dicts=retrieval["field_dicts"],
+            business_rules=retrieval["business_rules"], state_machines=retrieval["state_machines"],
+            term_mappings=retrieval["term_mappings"], defect_chunks=retrieval.get("defect_chunks"),
+            prd_chunks=retrieval.get("prd_chunks"), historical_cases=historical_cases,
+            module_focus=module_focus,
+        )
+
+    batch_cases: list[dict] = []
+    cur_user = user_content
+    for attempt in range(settings.LLM_MAX_CONTINUATIONS + 1):
+        raw = await llm.generate(base_system, cur_user)
+        cases = [c for c in _parse_cases(raw) if c.get("title") and not c.get("error")]
+        # 只累加"未出现过的 title"，避免续写时模型重复吐已有用例。
+        for c in cases:
+            key = _title_key(c.get("title", ""))
+            if key and key not in {_title_key(t) for t in existing_titles}:
+                batch_cases.append(c)
+                existing_titles.append(c.get("title", ""))
+
+        # 未被截断：本批正常结束。
+        if llm.last_finish_reason != "length":
+            break
+        # 被截断且还有续写额度：带上已有 title 续写。
+        if attempt < settings.LLM_MAX_CONTINUATIONS:
+            logger.warning(
+                "模块[%s]第 %d 轮被 max_tokens 截断（已累计 %d 条），继续续写",
+                module_focus or "单批", attempt + 1, len(existing_titles),
+            )
+            cur_user = PromptService.build_continuation(existing_titles)
+        else:
+            logger.warning(
+                "模块[%s]续写达到上限 %d 轮仍被截断，停止续写（已累计 %d 条）",
+                module_focus or "单批", settings.LLM_MAX_CONTINUATIONS, len(existing_titles),
+            )
+    return batch_cases
+
+
+def _title_key(title: str) -> str:
+    """title 归一化：去首尾空白 + 全角转半角 + 内部空白折叠，用于跨批精确去重。"""
+    if not title:
+        return ""
+    # 全角空格/标点常见变体归一（只处理空白，避免误伤业务语义）
+    t = title.replace("　", " ").strip()
+    return " ".join(t.split())
+
+
+def _dedup_by_title(cases: list[dict]) -> list[dict]:
+    """按归一化 title 精确去重，保留首次出现的用例（保序）。"""
+    seen: set[str] = set()
+    result: list[dict] = []
+    for c in cases:
+        key = _title_key(c.get("title", ""))
+        if not key:
+            result.append(c)  # 无 title 的（如 error 占位）不参与去重，原样保留
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(c)
+    return result
 
 
 def _case_brief(case: dict, idx: int) -> str:

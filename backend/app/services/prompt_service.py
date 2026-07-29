@@ -228,8 +228,14 @@ class PromptService:
         defect_chunks: list[dict] | None = None,
         prd_chunks: list[dict] | None = None,
         historical_cases: list[dict] | None = None,
+        module_focus: str | None = None,
     ) -> tuple[str, str]:
-        """返回供 LLM 调用的 system_content 和 user_content。"""
+        """返回供 LLM 调用的 system_content 和 user_content。
+
+        module_focus 非空时进入「模块分批」模式：知识库/系统提示不变，只在生成指令里
+        约束本批**只聚焦该模块**，不要输出其它模块的用例。用于把大需求拆成多批生成，
+        每批规模更小，从源头降低单次撞满 max_tokens 的概率。
+        """
 
         fd_table = PromptService._format_field_dicts(field_dicts)
         br_table = PromptService._format_business_rules(business_rules)
@@ -265,11 +271,18 @@ class PromptService:
         )
 
         # 用户需求和覆盖率提示。
+        module_clause = ""
+        if module_focus:
+            module_clause = f"""
+## 本批聚焦模块（重要）
+本次**只生成属于【{module_focus}】这一模块/功能域的测试用例**，其它模块的用例本批一律不要输出。
+所有用例的 title 前缀【模块-功能点】里的"模块"部分应与「{module_focus}」一致或从属于它。
+"""
         user_content = f"""## 需求内容
 {requirement_text}
 
 {prd_text}
-
+{module_clause}
 ## 生成指令
 请依据下面的知识库、需求和历史缺陷，按"覆盖率而非条数"的原则生成测试用例——
 需求里涉及多少个字段、规则、状态、缺陷模式、边界组合，就生成多少条用例，**不要为了控制条数而合并场景或省略边界值**。
@@ -302,6 +315,61 @@ class PromptService:
 ```"""
 
         return system_content, user_content
+
+    @staticmethod
+    def build_module_split(requirement_text: str, prd_chunks: list[dict] | None = None) -> tuple[str, str]:
+        """构造「模块拆分」提示词，让 LLM 从需求中提取【模块/功能域】清单。
+
+        返回 (system_content, user_content)。输出是一个 JSON 对象：
+        {
+          "modules": ["模块A", "模块B", ...],
+          "covers_all": true|false,
+          "reason": "如果 covers_all=false，说明遗漏了哪些未覆盖的章节"
+        }
+        """
+        prd_text = ""
+        if prd_chunks:
+            unique_texts = list(dict.fromkeys(d.get("text", "") for d in prd_chunks if d.get("text")))
+            if unique_texts:
+                prd_text = "\n## 相关PRD文档内容\n" + "\n---\n".join(t[:800] for t in unique_texts[:5])
+
+        system_content = """你是一名测试需求分析师。请阅读下面的需求内容，提取出其中所有可独立测试的【模块/功能域】清单。
+
+## 要求
+1. 模块粒度适中：一个"模块"对应一个可以独立生成测试用例的功能域（如"用户登录"、"订单管理"、"报表导出"）。
+2. 不要拆分过细（如"登录按钮"不应作为独立模块），也不要合并过粗（如"整个系统"不应作为唯一模块）。
+3. 覆盖需求中**所有章节和功能领域**，不得遗漏。
+4. output 严格为 JSON 对象（不要 markdown 代码块），含三个字段：
+   - "modules": 有序的模块名列表（数组）
+   - "covers_all": boolean，是否覆盖了需求的所有章节。不确定时优先 false。
+   - "reason": 如果 covers_all=false，说明遗漏了哪些未覆盖的章节或原因"""
+
+        user_content = f"""## 需求内容
+{requirement_text}
+
+{prd_text}
+
+请输出模块清单 JSON。"""
+        return system_content, user_content
+
+    @staticmethod
+    def build_continuation(existing_titles: list[str]) -> str:
+        """构造「续写」提示词，让 LLM 接着已生成的用例继续输出。
+
+        existing_titles: 已生成的用例标题列表，让模型避免重复。
+        返回 user_content 字符串，与 PromptService.build() 输出的 system_content 配对使用。
+        """
+        titles_str = "\n".join(f"- {t}" for t in existing_titles) if existing_titles else "（无已有用例）"
+        return f"""你继续生成上一轮输出被截断的测试用例。
+
+## 规则
+1. 不要重复下面已生成的用例标题
+2. 直接续写 JSON 数组，保持与之前一致的格式（title/priority/precondition/steps/expected_result/knowledge_refs）
+3. 不需要重新输出之前的用例，只需要输出**新增的**用例
+4. 不要用 markdown 代码块包裹，直接输出纯 JSON 数组
+
+## 当前已生成的用例标题（以下标题请勿重复）
+{titles_str}"""
 
     @staticmethod
     def _format_historical_cases(cases: list[dict]) -> str:
