@@ -17,9 +17,10 @@ _PROXY_ENV_VARS = (
     "all_proxy",
 )
 
-# 遇到服务端临时不可用(5xx)时的自动重试策略：指数退避。
-# 429（限流/额度超限）不重试——重试也无用，直接返回明确提示，避免白等。
-_RETRY_STATUS = {502, 503, 504}
+# 遇到服务端临时不可用(5xx)或限流(429)时的自动重试策略：指数退避。
+# 429 加入重试是因为并行化后可能偶发撞限流，自动等待后重试即可恢复；
+# 若持续 429 且套餐额度已用尽，重试也无用，让上层在超限后抛明确提示。
+_RETRY_STATUS = {429, 502, 503, 504}
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 2.0  # 秒；第 n 次重试等待 base * 2**n，即 2/4/8s
 
@@ -112,6 +113,10 @@ class LLMService:
         self.last_finish_reason = None
 
         timeout = httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=15.0)
+        # 是否已向上游 yield 过任何内容。超时重试只在「还没吐出任何内容」时才安全——
+        # 否则重试会让已发出的片段重复。评审等大 prompt 调用常在首字节前慢导致超时，
+        # 这类「空手超时」重试一次往往就能过。
+        emitted_any = False
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             for attempt in range(_MAX_RETRIES + 1):
                 # 把 httpx 的超时/网络异常转成携带中文提示的 LLMServiceError。
@@ -163,6 +168,7 @@ class LLMService:
                                     content = delta.get("content", "")
                                     if content:
                                         content_seen = True
+                                        emitted_any = True
                                         yield content
                                         continue
                                     reasoning = delta.get("reasoning_content", "")
@@ -171,9 +177,15 @@ class LLMService:
                                 except (json.JSONDecodeError, KeyError, IndexError):
                                     continue
                         if not content_seen and reasoning_buf and _looks_like_structured_output(reasoning_buf):
+                            emitted_any = True
                             yield reasoning_buf
                         return
                 except httpx.TimeoutException as exc:
+                    # 空手超时（还没吐任何内容）且有重试额度：退避后重试。
+                    # 已吐过内容再超时则不能重试（会重复），直接抛错。
+                    if not emitted_any and attempt < _MAX_RETRIES:
+                        await asyncio.sleep(_backoff_seconds(attempt))
+                        continue
                     raise LLMServiceError("模型响应超时，请稍后重试或缩短需求描述") from exc
                 except httpx.RequestError as exc:
                     raise LLMServiceError(f"无法连接模型服务：{exc}") from exc

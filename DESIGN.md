@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 设计方案
 
-> 版本 v0.13 | 更新 2026-07-29 | 状态：评审补充用例就近归组，同模块用例挨在一起
+> 版本 v0.14 | 更新 2026-07-29 | 状态：模块并行生成 + 按 agent 卡片分区流式展示 + 评审分批
 
 ## 修订记录
 
@@ -16,6 +16,7 @@
 | v0.11 | 2026-07-28 | LLM 输出解析分级容错：合法空结果（`{"cases": []}`）透传原因而非「格式错误，请重试」；截断输出逐条抢救；思考无正文提示调参。「无有效用例」统一按 `error` 事件处理、不发 `complete`、不落库；`persist_cases` 跳过无 title/error 占位 |
 | v0.12 | 2026-07-29 | 分批生成融合架构：阶段1抽取模块清单 → 阶段2按模块分批生成（每批内部套续写兜底）→ 阶段3跨批去重合并。`finish_reason=length` 检测截断后自动续写，`LLM_MAX_CONTINUATIONS` 兜底上限。新增 `LLM_ENABLE_MODULE_SPLIT` 开关可一键回退。
 | v0.13 | 2026-07-29 | 评审补充用例就近归组：补充用例按标题【】顶层模块插入到同模块用例之后，而非一律追加末尾，避免补充用例脱离相关模块影响观感（`_merge_supplements`）。
+| v0.14 | 2026-07-29 | 模块**并行**生成（替代 v0.12 的串行 for）：`LLM_MODULE_CONCURRENCY` 并发上限 + `LLM_MODULE_STAGGER_DELAY` 错峰启动，各模块独立 `LLMService` 实例，`asyncio.Queue` 汇流单点转发。模块内改**真流式**（`generate_stream` + `on_chunk` 回调），SSE 新增 `module_start/module_chunk/module_done/module_failed` 事件，前端按 agent 卡片分区展示各自的流（可多开，完成后卡内换为解析好的用例列表）。评审改**分批并发**（`LLM_REVIEW_BATCH_SIZE`，index 偏移映射回全局）防大批次超时；`generate_stream` 超时改「空手超时才退避重试」，429 纳入退避重试集。
 
 > 后续每次修改设计时，在此表追加一行（版本、日期、主要变更）。
 
@@ -147,17 +148,17 @@ VIP免运费 | user_level='vip' → freight=0 | 硬规则   | 订单模块 | PRD
                │
                ▼
 ┌──────────────────────────────────────┐
-│ 【阶段2】按模块循环生成 + 续写兜底     │ ← 每批内部套续写循环
-│  for 模块 in 模块清单:                 │
-│    生成(module_focus=模块)             │
-│    若 finish_reason=length:            │
-│      续写(带已有title防重复)           │
-│      循环到 stop 或 上限3轮             │
+│ 【阶段2】按模块并行生成 + 续写兜底     │ ← 并发上限 LLM_MODULE_CONCURRENCY
+│  并发(错峰 STAGGER_DELAY 启动):        │    各模块独立 LLMService 实例
+│    生成(module_focus=模块, 真流式)     │    on_chunk→asyncio.Queue 汇流单点转发
+│    若 finish_reason=length:            │    → SSE module_start/chunk/done/failed
+│      续写(带已有title防重复)           │    前端按 agent 卡片分区展示各自的流
+│      循环到 stop 或 上限3轮             │    单模块失败只跳过该模块，不中断整批
 └──────────────┬───────────────────────┘
                │
                ▼
 ┌──────────────────┐
-│ 跨批去重           │ ← 按 title 归一化后精确匹配，保序保留首次
+│ 跨批去重           │ ← 按 title 归一化后精确匹配，保序保留首次（并行后统一去重）
 └──────┬───────────┘
        │
        ▼
@@ -167,7 +168,7 @@ VIP免运费 | user_level='vip' → freight=0 | 硬规则   | 订单模块 | PRD
        │
        ▼
 ┌──────────────────┐
-│ LLM 评审           │ ← 逐条 keep/delete，不改写
+│ LLM 评审(分批并发) │ ← 逐条 keep/delete，不改写；超 REVIEW_BATCH_SIZE 分批防超时
 └──────┬───────────┘
        │
        ▼
