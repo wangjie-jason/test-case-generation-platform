@@ -137,7 +137,7 @@ class GeneratorService:
                     supp_output += chunk; yield {"type": "chunk", "text": chunk}
                 supplements = [c for c in _parse_cases(supp_output) if c.get("title") and not c.get("error")]
                 if supplements:
-                    all_cases = all_cases + supplements
+                    all_cases = _merge_supplements(all_cases, supplements)
                     yield {"type": "progress", "stage": "supplementing", "message": f"补充 {len(supplements)} 条用例，共 {len(all_cases)} 条"}
             warnings = await ValidationService.validate_cases(db, all_cases)
 
@@ -372,6 +372,36 @@ def _apply_review(cases: list[dict], reviews: list[dict]) -> tuple[list[dict], l
     kept = [c for i, c in enumerate(cases) if i not in delete_idx]
     deleted = [c for i, c in enumerate(cases) if i in delete_idx]
     return kept, deleted
+
+
+def _title_prefix(title: str) -> str:
+    """取标题里【】内的模块前缀（去掉 - 后的功能点，只留最顶层模块用于就近归组）。
+    如【PC端-工作台-统计概览】xxx → 'PC端'；无前缀则返回空串。"""
+    m = re.match(r"\s*【\s*([^】]+?)\s*】", title or "")
+    if not m:
+        return ""
+    return m.group(1).split("-")[0].strip()
+
+
+def _merge_supplements(kept: list[dict], supplements: list[dict]) -> list[dict]:
+    """把补充用例就近插到同模块用例后面，而不是一律追加到末尾。
+
+    以标题【】里的顶层模块为归组依据：每条补充用例插到 kept 中该模块最后一条之后；
+    找不到同模块（新模块）的补充按原顺序追加到末尾。这样评审补充的用例能与相关模块挨着。
+    """
+    result = list(kept)
+    for supp in supplements:
+        prefix = _title_prefix(supp.get("title", ""))
+        insert_at = None
+        if prefix:
+            for i, c in enumerate(result):
+                if _title_prefix(c.get("title", "")) == prefix:
+                    insert_at = i + 1  # 记录同模块最后一条的下一个位置
+        if insert_at is None:
+            result.append(supp)
+        else:
+            result.insert(insert_at, supp)
+    return result
 
 
 def _supplement_prompt(kept: list[dict], deleted: list[dict], gaps: list[str]) -> str:
