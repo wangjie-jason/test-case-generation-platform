@@ -86,53 +86,18 @@ class LLMService:
         ]
 
     async def generate(self, system_content: str, user_content: str) -> str:
-        """同步生成，非流式返回。"""
-        messages = self._build_messages(system_content, user_content)
+        """同步生成，返回完整正文。
 
-        # 推理类模型（如 GLM-4.5、GLM-4.7-Flash）会先输出较长的 reasoning_content，再生成正文，
-        # 总耗时可能很长。连接超时保持短，读超时拉长到 300s 以避免 ReadTimeout。
-        timeout = httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=15.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            for attempt in range(_MAX_RETRIES + 1):
-                try:
-                    response = await client.post(
-                        f"{self.base_url}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {self.api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json=self._build_payload(messages, stream=False),
-                    )
-                except httpx.TimeoutException as exc:
-                    raise LLMServiceError("模型响应超时，请稍后重试或缩短需求描述") from exc
-                except httpx.RequestError as exc:
-                    raise LLMServiceError(f"无法连接模型服务：{exc}") from exc
-
-                # 服务端瞬时错误（502/503/504）：指数退避后重试。
-                if response.status_code in _RETRY_STATUS and attempt < _MAX_RETRIES:
-                    await asyncio.sleep(_backoff_seconds(attempt, response))
-                    continue
-
-                if response.status_code != 200:
-                    detail = response.text[:300]
-                    if response.status_code == 429:
-                        raise LLMServiceError("模型调用受限（429）：可能是当前额度/配额已用尽或并发超限，请检查账户用量或更换模型")
-                    raise LLMServiceError(f"模型服务返回错误 {response.status_code}：{detail}")
-
-                data = response.json()
-                return self._extract_content(data)
-
-    @staticmethod
-    def _extract_content(data: dict) -> str:
-        """提取生成正文；正文为空时退回 reasoning_content（推理模型）。"""
-        try:
-            message = data["choices"][0]["message"]
-        except (KeyError, IndexError) as exc:
-            raise LLMServiceError("模型返回格式异常，缺少 choices/message") from exc
-        content = message.get("content") or ""
-        if not content.strip():
-            content = message.get("reasoning_content") or ""
-        return content
+        内部复用流式 SSE 路径累积成整段字符串，而非发一次非流式请求。原因：非流式
+        请求要等服务端把整段响应（含推理模型很长的 reasoning_content）全部生成完才返回，
+        等于一次性 read——推理模型思考稍久就会撞满 read 超时抛 ReadTimeout（评审阶段的
+        典型故障）。流式下服务端持续吐 token，read 超时是"两次 chunk 之间的间隔"，几乎
+        不会触发；且能顺带复用 generate_stream 里的 reasoning_content 兜底逻辑。
+        """
+        chunks: list[str] = []
+        async for chunk in self.generate_stream(system_content, user_content):
+            chunks.append(chunk)
+        return "".join(chunks)
 
     async def generate_stream(self, system_content: str, user_content: str) -> AsyncGenerator[str, None]:
         """通过 SSE 流式生成。"""
@@ -141,51 +106,60 @@ class LLMService:
         timeout = httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=15.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             for attempt in range(_MAX_RETRIES + 1):
-                async with client.stream(
-                    "POST",
-                    f"{self.base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=self._build_payload(messages, stream=True),
-                ) as response:
-                    # 限流/暂时不可用：读掉响应体释放连接后指数退避重试。
-                    if response.status_code in _RETRY_STATUS and attempt < _MAX_RETRIES:
-                        await response.aread()
-                        await asyncio.sleep(_backoff_seconds(attempt, response))
-                        continue
-                    if response.status_code != 200:
-                        await response.aread()
-                        if response.status_code == 429:
-                            raise LLMServiceError("模型调用受限（429）：可能是当前额度/配额已用尽或并发超限，请检查账户用量或更换模型")
-                        raise LLMServiceError(f"模型服务返回错误 {response.status_code}")
-                    # 推理模型在流式下常常把正文放进 delta.reasoning_content，delta.content 全程为空。
-                    # 若整段流下来一个 content 都没有，把累积的 reasoning_content 作为兜底一次性 yield，
-                    # 与非流式 _extract_content 的 fallback 保持一致，避免上层拿到空串。
-                    # 但要收紧：只有 reasoning 里出现过 JSON 起始符时才 yield，否则说明模型全程都在
-                    # 输出自然语言规划（思考爆了 max_tokens，还没进入正文），这种情况把思考文本喂给
-                    # 用例解析器一定是垃圾进垃圾出，还不如让上层清晰地拿到空串，报"模型只思考未输出"。
-                    content_seen = False
-                    reasoning_buf = ""
-                    async for line in response.aiter_lines():
-                        if line.startswith("data: "):
-                            chunk = line[6:]
-                            if chunk == "[DONE]":
-                                break
-                            try:
-                                data = json.loads(chunk)
-                                delta = data["choices"][0].get("delta", {})
-                                content = delta.get("content", "")
-                                if content:
-                                    content_seen = True
-                                    yield content
+                # 把 httpx 的超时/网络异常转成携带中文提示的 LLMServiceError。
+                # 这层转换过去只在非流式 generate 里有；如今 generate 也走本方法，
+                # 且上层（task_service / generation 路由）只捕获 LLMServiceError——
+                # 不转换的话，流式路径一旦超时会抛原始 httpx 异常，直接漏网。
+                try:
+                    async with client.stream(
+                        "POST",
+                        f"{self.base_url}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=self._build_payload(messages, stream=True),
+                    ) as response:
+                        # 限流/暂时不可用：读掉响应体释放连接后指数退避重试。
+                        if response.status_code in _RETRY_STATUS and attempt < _MAX_RETRIES:
+                            await response.aread()
+                            await asyncio.sleep(_backoff_seconds(attempt, response))
+                            continue
+                        if response.status_code != 200:
+                            await response.aread()
+                            if response.status_code == 429:
+                                raise LLMServiceError("模型调用受限（429）：可能是当前额度/配额已用尽或并发超限，请检查账户用量或更换模型")
+                            raise LLMServiceError(f"模型服务返回错误 {response.status_code}")
+                        # 推理模型在流式下常常把正文放进 delta.reasoning_content，delta.content 全程为空。
+                        # 若整段流下来一个 content 都没有，把累积的 reasoning_content 作为兜底一次性 yield，
+                        # 避免上层拿到空串（非流式 generate 现已复用本方法，同样受益）。
+                        # 但要收紧：只有 reasoning 里出现过 JSON 起始符时才 yield，否则说明模型全程都在
+                        # 输出自然语言规划（思考爆了 max_tokens，还没进入正文），这种情况把思考文本喂给
+                        # 用例解析器一定是垃圾进垃圾出，还不如让上层清晰地拿到空串，报"模型只思考未输出"。
+                        content_seen = False
+                        reasoning_buf = ""
+                        async for line in response.aiter_lines():
+                            if line.startswith("data: "):
+                                chunk = line[6:]
+                                if chunk == "[DONE]":
+                                    break
+                                try:
+                                    data = json.loads(chunk)
+                                    delta = data["choices"][0].get("delta", {})
+                                    content = delta.get("content", "")
+                                    if content:
+                                        content_seen = True
+                                        yield content
+                                        continue
+                                    reasoning = delta.get("reasoning_content", "")
+                                    if reasoning:
+                                        reasoning_buf += reasoning
+                                except (json.JSONDecodeError, KeyError, IndexError):
                                     continue
-                                reasoning = delta.get("reasoning_content", "")
-                                if reasoning:
-                                    reasoning_buf += reasoning
-                            except (json.JSONDecodeError, KeyError, IndexError):
-                                continue
-                    if not content_seen and reasoning_buf and _looks_like_structured_output(reasoning_buf):
-                        yield reasoning_buf
-                    return
+                        if not content_seen and reasoning_buf and _looks_like_structured_output(reasoning_buf):
+                            yield reasoning_buf
+                        return
+                except httpx.TimeoutException as exc:
+                    raise LLMServiceError("模型响应超时，请稍后重试或缩短需求描述") from exc
+                except httpx.RequestError as exc:
+                    raise LLMServiceError(f"无法连接模型服务：{exc}") from exc
