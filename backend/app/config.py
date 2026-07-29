@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     #   True（默认）= 大需求拆成多批，每批更聚焦、更不易截断；抽出的模块 ≤1 个时自动退化为单批。
     #   False = 关闭模块分批，只保留「续写式」兜底（撞满 max_tokens 就续写）。出问题可一键回退。
     LLM_ENABLE_MODULE_SPLIT: bool = True
+    # 需求文本长度低于此值（字符数）时跳过模块拆分，直接单批生成。
+    # 小需求单批生成本就撑不满 max_tokens，抽模块只会白花一次 LLM 调用。
+    # 续写式兜底始终生效，跳过不影响防截断，所以阈值可以定宽些。
+    LLM_MODULE_SPLIT_MIN_CHARS: int = 4000
     # 单批被 max_tokens 截断后，最多自动续写几轮（防止极端情况下无限续写）。
     LLM_MAX_CONTINUATIONS: int = 3
 

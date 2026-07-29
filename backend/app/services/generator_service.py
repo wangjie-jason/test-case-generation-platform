@@ -54,9 +54,11 @@ class GeneratorService:
         llm = LLMService()
 
         # ── 阶段1：模块拆分（可选） ──
-        # 仅在 LLM_ENABLE_MODULE_SPLIT 开启时抽取模块清单；关闭则退化为单批续写式。
+        # 仅在 LLM_ENABLE_MODULE_SPLIT 开启、且需求文本足够长时才抽取模块清单。
+        # 小需求（< LLM_MODULE_SPLIT_MIN_CHARS）跳过：单批生成本就撑不满 max_tokens，
+        # 抽模块只会白花一次 LLM 调用；且续写式兜底始终生效，跳过不影响防截断。
         modules = None
-        if settings.LLM_ENABLE_MODULE_SPLIT:
+        if settings.LLM_ENABLE_MODULE_SPLIT and len(requirement_text) >= settings.LLM_MODULE_SPLIT_MIN_CHARS:
             yield {"type": "progress", "stage": "splitting", "message": "正在分析模块结构..."}
             modules = await _extract_modules(llm, requirement_text, retrieval.get("prd_chunks"))
             if not modules or len(modules) <= 1:
