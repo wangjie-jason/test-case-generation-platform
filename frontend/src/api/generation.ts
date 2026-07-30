@@ -46,6 +46,21 @@ export type GenerateStreamEvent =
   | { type: 'module_done'; index: number; module: string; cases: GeneratedTestCase[]; elapsed?: number }
   // 某模块生成失败：卡片标记为失败态。elapsed 为失败前耗时（秒）。
   | { type: 'module_failed'; index: number; module: string; elapsed?: number }
+  // ── 评审阶段的多 agent 事件（与生成阶段同构）：按模块分组，每组一个评审 agent 并行跑，
+  //    各自一张卡片实时流式展示「AI 正在保留/删除哪条、理由是什么」。 ──
+  | { type: 'review_start'; index: number; module: string }
+  | { type: 'review_thinking'; index: number; text: string }
+  | { type: 'review_chunk'; index: number; text: string }
+  // 评审完成：kept/deleted 为该模块保留/删除条数，供卡片小结展示。
+  | { type: 'review_done'; index: number; module: string; kept?: number; deleted?: number; elapsed?: number }
+  | { type: 'review_failed'; index: number; module: string; elapsed?: number }
+  // ── 补充阶段的多 agent 事件：被删场景按模块、遗漏场景单独，各一个补充 agent 并行生成。──
+  | { type: 'supplement_start'; index: number; module: string }
+  | { type: 'supplement_thinking'; index: number; text: string }
+  | { type: 'supplement_chunk'; index: number; text: string }
+  // 补充完成：count 为该 agent 新生成的用例条数（去重前）。
+  | { type: 'supplement_done'; index: number; module: string; count?: number; elapsed?: number }
+  | { type: 'supplement_failed'; index: number; module: string; elapsed?: number }
   | {
       // 检索完成后立即推送，让前端在等生成时就能显示命中的知识。
       // complete 事件里也会带同样两个字段，用于重连兜底。

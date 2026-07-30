@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 实施计划
 
-> 版本 v1.5 | 更新 2026-07-30 | 生成耗时可视化（每 agent + 总耗时）+ 模块并行生成 + agent 卡片分区流式 + 评审分批 + 需求补全 + 多人隔离 + 飞书 PRD 导入
+> 版本 v1.6 | 更新 2026-07-30 | 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
 
 ## 当前状态
 - **架构变更**: Project/Module → KnowledgeBase（知识库为核心，卡片式管理）
@@ -21,7 +21,7 @@
 | 生成任务       | 后台任务(asyncio)+独立DB会话，SSE事件缓存重放，刷新/切页后断点续看，全局页头「生成中」入口 | ✓    |
 | 评审-删除-补充 | 生成后 LLM 以测试专家身份逐条判定保留/删除，定向补充缺口，不再整批改写                     | ✓    |
 | 并行生成       | store 改为多任务 Map，可同时发起多个生成互不阻塞；前端任务列表可切换查看                   | ✓    |
-| 模块并行+分区流式 | 大需求按模块并发生成（并发上限+错峰防限流），模块内真流式，前端按 agent 卡片分区展示各自的流（可多开，完成后换用例列表）；评审分批并发防超时 | ✓    |
+| 模块并行+分区流式 | 大需求按模块并发生成（并发上限+错峰防限流），模块内真流式，前端按 agent 卡片分区展示各自的流（可多开，完成后换用例列表）；评审/补充也按模块并发 + agent 卡片流式（实时看到保留/删除判断与补充过程） | ✓    |
 | 多人隔离       | localStorage 匿名 client_id，后端 owner_id 过滤 active 任务，不同浏览器互不干扰            | ✓    |
 | 需求补全       | POST /generate/clarify，LLM 结合知识库补全简略需求为结构化 Markdown，可编辑确认            | ✓    |
 | 429 处理       | 限额/限流不重试直接报错，5xx 服务端抖动保留指数退避重试                                    | ✓    |
@@ -143,6 +143,16 @@ event: module_start  → {index, module}                                    # �
 event: module_chunk  → {index, text}                                      # 该模块的实时流，前端按 index 分区归档
 event: module_done   → {index, module, cases: [...], elapsed}             # 该模块完成，带解析好的用例 + 生成耗时(秒)
 event: module_failed → {index, module, elapsed}                           # 该模块失败（跳过，不中断整批），带失败前耗时(秒)
+event: review_start    → {index, module}                                  # 某评审 agent(按模块分组)开始
+event: review_thinking → {index, text}                                    # 该评审 agent 的思考流
+event: review_chunk    → {index, text}                                    # 该评审 agent 的实时评审输出(keep/delete 判断)
+event: review_done     → {index, module, kept, deleted, elapsed}          # 该评审 agent 完成，带保留/删除条数 + 耗时(秒)
+event: review_failed   → {index, module, elapsed}                         # 该评审 agent 失败（该组默认全部保留）
+event: supplement_start    → {index, module}                              # 某补充 agent(被删模块/遗漏场景)开始
+event: supplement_thinking → {index, text}                                # 该补充 agent 的思考流
+event: supplement_chunk    → {index, text}                                # 该补充 agent 的实时补充用例输出
+event: supplement_done     → {index, module, count, elapsed}              # 该补充 agent 完成，带新增条数(去重前) + 耗时(秒)
+event: supplement_failed   → {index, module, elapsed}                     # 该补充 agent 失败（该组跳过）
 event: knowledge → {knowledge_used: {...}, knowledge_matches: {...}}    # 检索结束后立即推送，让前端不等生成完成也能显示命中知识
 event: complete  → {cases: [...], knowledge_used: {...}, knowledge_matches: {...}, validation_warnings: [...], elapsed}  # elapsed 为总耗时(秒)
 event: error     → {message: "..."}

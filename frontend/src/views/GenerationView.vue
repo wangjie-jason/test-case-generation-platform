@@ -12,6 +12,7 @@ const {
   kbs, selectedKbs, requirementText, batchName, inputMode, isParsing, parsedFilename,
   tabActive, isGenerating, cases, genProgress, streamText, knowledgeCounts,
   knowledgeMatches, taskList, activeTaskId, runningCount, modules, agents,
+  reviewAgents, supplementAgents,
   clarifiedText, isClarifying, historyDirty, elapsed, taskStartedAt,
 } = storeToRefs(store)
 
@@ -58,6 +59,9 @@ const totalSeconds = computed<number | null>(() => {
 
 // 展开的 agent 卡片（可多开）。默认全部收起，只有用户手动点开才展开——不做任何自动展开。
 const openAgents = ref<number[]>([])
+// 评审 / 补充阶段的卡片各自独立的展开态（它们的 index 各自从 0 起，不能共用 openAgents）。
+const openReviewAgents = ref<number[]>([])
+const openSupplementAgents = ref<number[]>([])
 
 // 历史记录：先拉批次汇总渲染折叠卡片，点开某批时再懒加载该批全量用例。
 // 老实现是一次拉 /cases（写死 200 上限），大批次会被截断——现在按 batch_id 精确拉。
@@ -362,6 +366,61 @@ async function downloadBatch(batch: BatchSummary) {
 
           <!-- 单批（无模块拆分）时的全局流式兜底 -->
           <div v-if="isGenerating && streamText && !agents.length" class="stream-output">{{ streamText }}</div>
+
+          <!-- 评审 agent 卡片区：每个模块分组一张卡，实时流式展示评审过程（保留/删除判断）。 -->
+          <div v-if="reviewAgents.length" class="agent-area">
+            <div class="phase-label">🔍 测试专家分模块并行评审</div>
+            <el-collapse v-model="openReviewAgents">
+              <el-collapse-item v-for="a in reviewAgents" :key="a.index" :name="a.index">
+                <template #title>
+                  <el-icon v-if="a.status === 'running'" class="spin agent-ico"><Loading /></el-icon>
+                  <span v-else-if="a.status === 'done'" class="agent-ico done">✓</span>
+                  <span v-else class="agent-ico failed">✕</span>
+                  <span class="agent-name">{{ a.module }}</span>
+                  <span class="agent-meta">
+                    {{ a.status === 'running' ? '评审中…' : a.status === 'failed' ? '失败' : a.summary }}
+                    <span v-if="agentSeconds(a) != null" class="agent-time">· ⏱ {{ formatDuration(agentSeconds(a)) }}</span>
+                  </span>
+                </template>
+                <div v-if="a.status === 'failed'" class="agent-empty">该模块评审失败，已跳过（默认全部保留）</div>
+                <template v-else>
+                  <div v-if="a.streamText" class="stream-output">{{ a.streamText }}</div>
+                  <div v-else-if="a.thinkText" class="stream-output thinking">
+                    <div class="thinking-badge">🤔 深度思考中…</div>{{ a.thinkText }}
+                  </div>
+                  <div v-else class="stream-output thinking">🤔 深度思考中…</div>
+                </template>
+              </el-collapse-item>
+            </el-collapse>
+          </div>
+
+          <!-- 补充 agent 卡片区：被删场景/遗漏场景各一张卡，实时流式展示补充用例的生成。 -->
+          <div v-if="supplementAgents.length" class="agent-area">
+            <div class="phase-label">➕ 分模块并行补充遗漏场景</div>
+            <el-collapse v-model="openSupplementAgents">
+              <el-collapse-item v-for="a in supplementAgents" :key="a.index" :name="a.index">
+                <template #title>
+                  <el-icon v-if="a.status === 'running'" class="spin agent-ico"><Loading /></el-icon>
+                  <span v-else-if="a.status === 'done'" class="agent-ico done">✓</span>
+                  <span v-else class="agent-ico failed">✕</span>
+                  <span class="agent-name">{{ a.module }}</span>
+                  <span class="agent-meta">
+                    {{ a.status === 'running' ? '补充中…' : a.status === 'failed' ? '失败' : a.summary }}
+                    <span v-if="agentSeconds(a) != null" class="agent-time">· ⏱ {{ formatDuration(agentSeconds(a)) }}</span>
+                  </span>
+                </template>
+                <div v-if="a.status === 'failed'" class="agent-empty">该组补充失败，已跳过</div>
+                <template v-else>
+                  <div v-if="a.streamText" class="stream-output">{{ a.streamText }}</div>
+                  <div v-else-if="a.thinkText" class="stream-output thinking">
+                    <div class="thinking-badge">🤔 深度思考中…</div>{{ a.thinkText }}
+                  </div>
+                  <div v-else class="stream-output thinking">🤔 深度思考中…</div>
+                </template>
+              </el-collapse-item>
+            </el-collapse>
+          </div>
+
           <el-tag v-if="kSummary !== '无'" size="small" type="info" style="margin:8px 0">引用知识：{{ kSummary }}</el-tag>
           <div v-if="cases.length" class="final-cases-title">最终用例（评审+补充后，共 {{ cases.length }} 条）</div>
           <div v-for="(c, idx) in cases" :key="idx" style="margin-bottom:8px">
@@ -439,6 +498,7 @@ async function downloadBatch(batch: BatchSummary) {
 .module-list-label { font-size: 13px; color: #606266; font-weight: 600; }
 .module-tag { margin: 0; }
 .agent-area { margin: 10px 0; }
+.phase-label { font-size: 13px; font-weight: 600; color: #606266; margin: 6px 0; }
 .agent-ico { flex-shrink: 0; width: 18px; text-align: center; margin-right: 6px; }
 .agent-ico.done { color: #67C23A; font-weight: bold; }
 .agent-ico.failed { color: #F56C6C; font-weight: bold; }
