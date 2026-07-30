@@ -1,11 +1,15 @@
 import asyncio
 import json
+import logging
 import os
 from typing import AsyncGenerator
 
 import httpx
 
 from app.config import settings
+
+
+logger = logging.getLogger(__name__)
 
 
 _PROXY_ENV_VARS = (
@@ -106,8 +110,16 @@ class LLMService:
             chunks.append(chunk)
         return "".join(chunks)
 
-    async def generate_stream(self, system_content: str, user_content: str) -> AsyncGenerator[str, None]:
-        """通过 SSE 流式生成。"""
+    async def generate_stream(self, system_content: str, user_content: str,
+                              on_reasoning=None) -> AsyncGenerator[str, None]:
+        """通过 SSE 流式生成。
+
+        on_reasoning 非空时，每收到一段 reasoning_content（模型思考）就以其为参数调用
+        （可为 async）。注意：思考文本【只】通过该回调外发，绝不 yield——yield 出去的
+        始终只是正文 content，避免思考被当作用例喂给解析器。reasoning=max 下模型会先
+        长时间思考、正文全程为空，这段时间若不外发思考，上层就完全没有反馈（前端表现为
+        "等待模型输出"）。有了 on_reasoning，上层可实时展示"思考中"的流。
+        """
         messages = self._build_messages(system_content, user_content)
         # 每次调用先重置，避免上一次的 finish_reason 泄漏到本次判断。
         self.last_finish_reason = None
@@ -135,8 +147,13 @@ class LLMService:
                     ) as response:
                         # 限流/暂时不可用：读掉响应体释放连接后指数退避重试。
                         if response.status_code in _RETRY_STATUS and attempt < _MAX_RETRIES:
+                            backoff = _backoff_seconds(attempt, response)
+                            logger.warning(
+                                "模型请求撞限流/暂不可用 status=%s，第 %d 次退避重试，等待 %.2fs",
+                                response.status_code, attempt + 1, backoff,
+                            )
                             await response.aread()
-                            await asyncio.sleep(_backoff_seconds(attempt, response))
+                            await asyncio.sleep(backoff)
                             continue
                         if response.status_code != 200:
                             await response.aread()
@@ -174,6 +191,10 @@ class LLMService:
                                     reasoning = delta.get("reasoning_content", "")
                                     if reasoning:
                                         reasoning_buf += reasoning
+                                        if on_reasoning is not None:
+                                            res = on_reasoning(reasoning)
+                                            if asyncio.iscoroutine(res):
+                                                await res
                                 except (json.JSONDecodeError, KeyError, IndexError):
                                     continue
                         if not content_seen and reasoning_buf and _looks_like_structured_output(reasoning_buf):

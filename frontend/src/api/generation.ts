@@ -38,6 +38,9 @@ export type GenerateStreamEvent =
   | { type: 'module_start'; index: number; module: string }
   // 某模块的实时流式文本：按 index 归档到对应 agent 卡片的流缓冲区。
   | { type: 'module_chunk'; index: number; text: string }
+  // 某模块的思考流（reasoning_content）：思考阶段实时下发，前端展示 🤔 思考中，
+  // 避免思考期干等"等待模型输出"。思考文本不参与用例解析。
+  | { type: 'module_thinking'; index: number; text: string }
   // 某模块生成完成：带该模块解析出的用例，前端把卡片从流式文本切换为用例列表。
   | { type: 'module_done'; index: number; module: string; cases: GeneratedTestCase[] }
   // 某模块生成失败：卡片标记为失败态。

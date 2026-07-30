@@ -99,13 +99,19 @@ class GeneratorService:
                     await event_q.put({"type": "module_start", "index": idx, "module": module})
 
                     async def _on_chunk(text: str) -> None:
-                        # 该模块的实时流：带 index，前端归档到对应 agent 卡片。
+                        # 该模块的实时正文流：带 index，前端归档到对应 agent 卡片。
                         await event_q.put({"type": "module_chunk", "index": idx, "text": text})
+
+                    async def _on_reasoning(text: str) -> None:
+                        # 该模块的思考流：同样推给前端，但用独立事件类型，
+                        # 前端在思考阶段展示 🤔 思考中，避免干等"等待模型输出"。
+                        await event_q.put({"type": "module_thinking", "index": idx, "text": text})
 
                     try:
                         batch = await _generate_one_batch(
                             LLMService(), base_system, requirement_text, retrieval, historical_cases,
                             module_focus=module, existing_titles=[], on_chunk=_on_chunk,
+                            on_reasoning=_on_reasoning,
                         )
                     except Exception:
                         logger.exception("模块[%s]并行生成失败", module)
@@ -122,7 +128,7 @@ class GeneratorService:
                 etype = ev["type"]
                 if etype == "module_start":
                     yield ev
-                elif etype == "module_chunk":
+                elif etype in ("module_chunk", "module_thinking"):
                     yield ev
                 elif etype == "module_failed":
                     done_count += 1
@@ -299,7 +305,7 @@ async def _generate_one_batch(
     llm, base_system: str, requirement_text: str, retrieval: dict,
     historical_cases: list[dict], module_focus: str | None,
     existing_titles: list[str], user_content: str | None = None,
-    on_chunk=None,
+    on_chunk=None, on_reasoning=None,
 ) -> list[dict]:
     """生成一批用例，内含「续写式」兜底：撞满 max_tokens 就带着已有 title 续写，
     循环到 finish_reason != length 或达到 LLM_MAX_CONTINUATIONS 上限。
@@ -324,7 +330,7 @@ async def _generate_one_batch(
         # 流式收取：边收边把原始文本通过 on_chunk 推给上层展示，同时累积成整段
         # 供后续 _parse_cases 解析。相比一次性 generate()，用户能看到 agent 实时吐字。
         parts: list[str] = []
-        async for piece in llm.generate_stream(base_system, cur_user):
+        async for piece in llm.generate_stream(base_system, cur_user, on_reasoning=on_reasoning):
             parts.append(piece)
             if on_chunk is not None and piece:
                 res = on_chunk(piece)
