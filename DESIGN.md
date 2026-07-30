@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 设计方案
 
-> 版本 v0.14 | 更新 2026-07-29 | 状态：模块并行生成 + 按 agent 卡片分区流式展示 + 评审分批
+> 版本 v0.15 | 更新 2026-07-30 | 状态：生成耗时可视化（每个 agent + 总耗时）
 
 ## 修订记录
 
@@ -17,6 +17,7 @@
 | v0.12 | 2026-07-29 | 分批生成融合架构：阶段1抽取模块清单 → 阶段2按模块分批生成（每批内部套续写兜底）→ 阶段3跨批去重合并。`finish_reason=length` 检测截断后自动续写，`LLM_MAX_CONTINUATIONS` 兜底上限。新增 `LLM_ENABLE_MODULE_SPLIT` 开关可一键回退。
 | v0.13 | 2026-07-29 | 评审补充用例就近归组：补充用例按标题【】顶层模块插入到同模块用例之后，而非一律追加末尾，避免补充用例脱离相关模块影响观感（`_merge_supplements`）。
 | v0.14 | 2026-07-29 | 模块**并行**生成（替代 v0.12 的串行 for）：`LLM_MODULE_CONCURRENCY` 并发上限 + `LLM_MODULE_STAGGER_DELAY` 错峰启动，各模块独立 `LLMService` 实例，`asyncio.Queue` 汇流单点转发。模块内改**真流式**（`generate_stream` + `on_chunk` 回调），SSE 新增 `module_start/module_chunk/module_done/module_failed` 事件，前端按 agent 卡片分区展示各自的流（可多开，完成后卡内换为解析好的用例列表）。评审改**分批并发**（`LLM_REVIEW_BATCH_SIZE`，index 偏移映射回全局）防大批次超时；`generate_stream` 超时改「空手超时才退避重试」，429 纳入退避重试集。
+| v0.15 | 2026-07-30 | 生成耗时可视化：后端 `time.monotonic()` 记录每个模块生成耗时（不含错峰/排队等待，随 `module_done`/`module_failed` 事件带 `elapsed` 秒）与整体总耗时（随 `complete` 事件带 `elapsed`），前端在各 agent 卡片标题旁显示 ⏱ 耗时、结果区标题显示总耗时。|
 
 > 后续每次修改设计时，在此表追加一行（版本、日期、主要变更）。
 

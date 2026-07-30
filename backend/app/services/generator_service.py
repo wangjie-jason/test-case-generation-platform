@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +35,8 @@ class GeneratorService:
 
     @staticmethod
     async def generate_stream(db: AsyncSession, requirement_text: str, kb_ids: list[str] | None = None) -> AsyncGenerator[dict, None]:
+        # 记录整体开始时间，complete 事件里回传总耗时（秒）。
+        started_at = time.monotonic()
         yield {"type": "progress", "stage": "retrieving", "message": "正在检索知识库..."}
         retrieval = await RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)
         historical_cases = await _get_historical_cases(requirement_text, retrieval["query_keywords"], kb_ids)
@@ -96,6 +99,8 @@ class GeneratorService:
                 if stagger and idx:
                     await asyncio.sleep(idx * stagger)
                 async with sem:
+                    # 该模块真正开始生成的时间：不含错峰/排队等待，只计入 LLM 生成本身。
+                    mod_start = time.monotonic()
                     await event_q.put({"type": "module_start", "index": idx, "module": module})
 
                     async def _on_chunk(text: str) -> None:
@@ -115,9 +120,11 @@ class GeneratorService:
                         )
                     except Exception:
                         logger.exception("模块[%s]并行生成失败", module)
-                        await event_q.put({"type": "module_failed", "index": idx, "module": module})
+                        await event_q.put({"type": "module_failed", "index": idx, "module": module,
+                                           "elapsed": round(time.monotonic() - mod_start, 1)})
                         return
-                    await event_q.put({"type": "module_done", "index": idx, "module": module, "cases": batch})
+                    await event_q.put({"type": "module_done", "index": idx, "module": module, "cases": batch,
+                                       "elapsed": round(time.monotonic() - mod_start, 1)})
 
             tasks = [asyncio.create_task(_run_module(i, m)) for i, m in enumerate(modules)]
 
@@ -132,7 +139,8 @@ class GeneratorService:
                     yield ev
                 elif etype == "module_failed":
                     done_count += 1
-                    yield {"type": "module_failed", "index": ev["index"], "module": ev["module"]}
+                    yield {"type": "module_failed", "index": ev["index"], "module": ev["module"],
+                           "elapsed": ev.get("elapsed")}
                     yield {"type": "progress", "stage": "generating",
                            "message": f"模块生成进度 {done_count}/{total}（模块「{ev['module']}」失败已跳过）"}
                 elif etype == "module_done":
@@ -142,8 +150,9 @@ class GeneratorService:
                         logger.info("模块[%s]生成 %d 条用例", ev["module"], len(batch))
                         all_cases.extend(batch)
                     # 把该模块解析出的用例随完成事件下发，前端用它把卡片从「流式文本」
-                    # 切换为解析好的用例列表。
-                    yield {"type": "module_done", "index": ev["index"], "module": ev["module"], "cases": batch}
+                    # 切换为解析好的用例列表。elapsed 为该模块生成耗时（秒）。
+                    yield {"type": "module_done", "index": ev["index"], "module": ev["module"], "cases": batch,
+                           "elapsed": ev.get("elapsed")}
                     yield {"type": "progress", "stage": "generating",
                            "message": f"模块生成进度 {done_count}/{total}：{ev['module']}"}
             # 兜底：确保所有任务已结束（正常情况下 done_count 达标时它们都已 return）。
@@ -206,7 +215,8 @@ class GeneratorService:
                     yield {"type": "progress", "stage": "supplementing", "message": f"补充 {len(supplements)} 条用例，共 {len(all_cases)} 条"}
             warnings = await ValidationService.validate_cases(db, all_cases)
 
-        yield {"type": "complete", "cases": all_cases, "knowledge_used": kc, "knowledge_matches": km, "validation_warnings": warnings}
+        yield {"type": "complete", "cases": all_cases, "knowledge_used": kc, "knowledge_matches": km,
+               "validation_warnings": warnings, "elapsed": round(time.monotonic() - started_at, 1)}
 
 
 def _knowledge_matches(retrieval: dict, historical_cases: list[dict]) -> dict[str, list[dict]]:

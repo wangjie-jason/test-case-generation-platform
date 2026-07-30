@@ -42,9 +42,10 @@ export type GenerateStreamEvent =
   // 避免思考期干等"等待模型输出"。思考文本不参与用例解析。
   | { type: 'module_thinking'; index: number; text: string }
   // 某模块生成完成：带该模块解析出的用例，前端把卡片从流式文本切换为用例列表。
-  | { type: 'module_done'; index: number; module: string; cases: GeneratedTestCase[] }
-  // 某模块生成失败：卡片标记为失败态。
-  | { type: 'module_failed'; index: number; module: string }
+  // elapsed 为该模块生成耗时（秒）。
+  | { type: 'module_done'; index: number; module: string; cases: GeneratedTestCase[]; elapsed?: number }
+  // 某模块生成失败：卡片标记为失败态。elapsed 为失败前耗时（秒）。
+  | { type: 'module_failed'; index: number; module: string; elapsed?: number }
   | {
       // 检索完成后立即推送，让前端在等生成时就能显示命中的知识。
       // complete 事件里也会带同样两个字段，用于重连兜底。
@@ -58,6 +59,7 @@ export type GenerateStreamEvent =
       knowledge_used: Record<string, number>
       knowledge_matches: KnowledgeMatches
       validation_warnings: unknown[] | null
+      elapsed?: number
     }
   | { type: 'error'; message: string }
 

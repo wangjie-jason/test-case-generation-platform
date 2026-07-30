@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 实施计划
 
-> 版本 v1.4 | 更新 2026-07-29 | 模块并行生成 + agent 卡片分区流式 + 评审分批 + 需求补全 + 多人隔离 + 飞书 PRD 导入
+> 版本 v1.5 | 更新 2026-07-30 | 生成耗时可视化（每 agent + 总耗时）+ 模块并行生成 + agent 卡片分区流式 + 评审分批 + 需求补全 + 多人隔离 + 飞书 PRD 导入
 
 ## 当前状态
 - **架构变更**: Project/Module → KnowledgeBase（知识库为核心，卡片式管理）
@@ -141,10 +141,10 @@ event: chunk     → {text: "(LLM 增量输出)"}                               
 event: modules       → {modules: ["模块A", "模块B", ...]}                  # 模块拆分完成后推送清单
 event: module_start  → {index, module}                                    # 某模块(agent)开始生成
 event: module_chunk  → {index, text}                                      # 该模块的实时流，前端按 index 分区归档
-event: module_done   → {index, module, cases: [...]}                      # 该模块完成，带解析好的用例
-event: module_failed → {index, module}                                    # 该模块失败（跳过，不中断整批）
+event: module_done   → {index, module, cases: [...], elapsed}             # 该模块完成，带解析好的用例 + 生成耗时(秒)
+event: module_failed → {index, module, elapsed}                           # 该模块失败（跳过，不中断整批），带失败前耗时(秒)
 event: knowledge → {knowledge_used: {...}, knowledge_matches: {...}}    # 检索结束后立即推送，让前端不等生成完成也能显示命中知识
-event: complete  → {cases: [...], knowledge_used: {...}, knowledge_matches: {...}, validation_warnings: [...]}
+event: complete  → {cases: [...], knowledge_used: {...}, knowledge_matches: {...}, validation_warnings: [...], elapsed}  # elapsed 为总耗时(秒)
 event: error     → {message: "..."}
 ```
 
