@@ -255,20 +255,23 @@ async function downloadBatch(batch: BatchSummary) {
                 <el-tag v-if="kSummary !== '无'" size="small" type="warning">{{ kSummary }}</el-tag>
               </div>
             </template>
-            <el-alert v-if="isGenerating && !hasKnowledgeMatches" :title="genProgress || '正在检索知识库并生成用例...'" type="info" :closable="false" />
-            <template v-else-if="hasKnowledgeMatches">
-              <div v-for="group in matchGroups" :key="group.key" class="match-group">
-                <div class="match-group-title">
-                  <span>{{ group.title }}</span>
-                  <el-tag size="small" effect="plain">{{ group.items.length || knowledgeCounts[group.countKey] || 0 }}</el-tag>
+            <!-- 命中知识内容区：设最大高度，命中过多时栏内滚动，避免撑长整个页面 -->
+            <div class="knowledge-body">
+              <el-alert v-if="isGenerating && !hasKnowledgeMatches" :title="genProgress || '正在检索知识库并生成用例...'" type="info" :closable="false" />
+              <template v-else-if="hasKnowledgeMatches">
+                <div v-for="group in matchGroups" :key="group.key" class="match-group">
+                  <div class="match-group-title">
+                    <span>{{ group.title }}</span>
+                    <el-tag size="small" effect="plain">{{ group.items.length || knowledgeCounts[group.countKey] || 0 }}</el-tag>
+                  </div>
+                  <div v-for="(item, idx) in group.items" :key="`${group.key}-${idx}`" class="match-item">
+                    <div class="match-title">{{ matchTitle(group.key, item) }}</div>
+                    <div v-if="matchDescription(group.key, item)" class="match-desc">{{ matchDescription(group.key, item) }}</div>
+                  </div>
                 </div>
-                <div v-for="(item, idx) in group.items" :key="`${group.key}-${idx}`" class="match-item">
-                  <div class="match-title">{{ matchTitle(group.key, item) }}</div>
-                  <div v-if="matchDescription(group.key, item)" class="match-desc">{{ matchDescription(group.key, item) }}</div>
-                </div>
-              </div>
-            </template>
-            <el-empty v-else :description="cases.length ? '未命中知识库内容' : '生成后显示命中的字段、规则、缺陷等知识'" />
+              </template>
+              <el-empty v-else :description="cases.length ? '未命中知识库内容' : '生成后显示命中的字段、规则、缺陷等知识'" />
+            </div>
           </el-card>
         </div>
       </div>
@@ -311,8 +314,14 @@ async function downloadBatch(batch: BatchSummary) {
                 </template>
                 <!-- 失败 -->
                 <div v-else-if="a.status === 'failed'" class="agent-empty">该模块生成失败，已跳过（其余模块不受影响）</div>
-                <!-- 生成中：展示实时原始流 -->
-                <div v-else class="stream-output">{{ a.streamText || '正在等待模型输出…' }}</div>
+                <!-- 生成中：优先展示正文实时流；正文未开始时展示思考流（🤔 深度思考中） -->
+                <template v-else>
+                  <div v-if="a.streamText" class="stream-output">{{ a.streamText }}</div>
+                  <div v-else-if="a.thinkText" class="stream-output thinking">
+                    <div class="thinking-badge">🤔 深度思考中…</div>{{ a.thinkText }}
+                  </div>
+                  <div v-else class="stream-output thinking">🤔 深度思考中…</div>
+                </template>
               </el-collapse-item>
             </el-collapse>
           </div>
@@ -382,10 +391,14 @@ async function downloadBatch(batch: BatchSummary) {
 .input-panel :deep(.el-button + .el-button) { margin-left: 0; }
 .input-panel > :deep(.el-card), .knowledge-panel > :deep(.el-card) { height: 100%; }
 .knowledge-panel { flex: 1; min-width: 0; }
+/* 命中知识过多时栏内滚动，不撑长整个页面 */
+.knowledge-body { max-height: 60vh; overflow-y: auto; padding-right: 4px; }
 .output-panel { width: 100%; }
 .label { font-size: 13px; color: #606266; margin-bottom: 4px; }
 .results-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .stream-output { margin-top: 10px; padding: 10px 12px; background: #1e1e1e; color: #d4d4d4; border-radius: 6px; font-family: 'SFMono-Regular', Menlo, Consolas, monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow-y: auto; }
+.stream-output.thinking { background: #2a2a2a; color: #9aa0a6; font-style: italic; }
+.thinking-badge { font-style: normal; color: #c8a95a; margin-bottom: 6px; font-weight: 600; }
 .module-list { margin: 8px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .module-list-label { font-size: 13px; color: #606266; font-weight: 600; }
 .module-tag { margin: 0; }

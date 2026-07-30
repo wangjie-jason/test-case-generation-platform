@@ -11,6 +11,7 @@ interface AgentState {
   index: number
   module: string
   status: 'running' | 'done' | 'failed'
+  thinkText: string         // 该 agent 的思考流（reasoning_content，思考阶段展示）
   streamText: string        // 该 agent 的实时原始流（生成中展示）
   cases: GeneratedTestCase[] // 完成后解析好的用例（完成后展示，替代流文本）
 }
@@ -132,7 +133,11 @@ export const useGenerationStore = defineStore('generation', () => {
       // 某 agent 开始跑：建卡或激活已有卡（重连重放时可能重复收到，按 index 幂等）。
       const a = t.agents.find(x => x.index === event.index)
       if (a) { a.status = 'running' }
-      else { t.agents.push({ index: event.index, module: event.module, status: 'running', streamText: '', cases: [] }) }
+      else { t.agents.push({ index: event.index, module: event.module, status: 'running', thinkText: '', streamText: '', cases: [] }) }
+    } else if (event.type === 'module_thinking') {
+      // 该 agent 的思考流：追加到它自己的思考缓冲区，思考阶段展示，避免干等。
+      const a = t.agents.find(x => x.index === event.index)
+      if (a) a.thinkText += event.text
     } else if (event.type === 'module_chunk') {
       // 该 agent 的实时流：追加到它自己的缓冲区，不与其它 agent 交错。
       const a = t.agents.find(x => x.index === event.index)
