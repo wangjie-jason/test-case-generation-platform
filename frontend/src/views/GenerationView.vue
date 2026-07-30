@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, computed, ref, watch } from 'vue'
+import { onMounted, onUnmounted, computed, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { generationApi, type CaseRecord, type BatchSummary } from '@/api/generation'
 import { ElMessage } from 'element-plus'
@@ -12,24 +12,52 @@ const {
   kbs, selectedKbs, requirementText, batchName, inputMode, isParsing, parsedFilename,
   tabActive, isGenerating, cases, genProgress, streamText, knowledgeCounts,
   knowledgeMatches, taskList, activeTaskId, runningCount, modules, agents,
-  clarifiedText, isClarifying, historyDirty,
+  clarifiedText, isClarifying, historyDirty, elapsed, taskStartedAt,
 } = storeToRefs(store)
 
-// 展开的 agent 卡片（可多开）。每个 agent 首次出现时自动展开一次，之后完全尊重用户的
-// 手动折叠/展开——用 autoExpanded 记录「已自动展开过的 index」，避免流式 chunk 不断触发
-// watch 把用户刚收起的卡片又强行展开（收不起来的根因）。
-const openAgents = ref<number[]>([])
-const autoExpanded = new Set<number>()
-watch(agents, (list) => {
-  for (const a of list) {
-    if (!autoExpanded.has(a.index)) {
-      autoExpanded.add(a.index)
-      if (!openAgents.value.includes(a.index)) {
-        openAgents.value = [...openAgents.value, a.index]
-      }
-    }
+// 全局秒表：每 200ms 自增一次，作为「实时耗时」计算的时间基准。
+// 运行中的 agent / 总耗时都以 now - startedAt 现算，now 一变视图就重算，实现秒表效果。
+// 只在有任务运行时才开表，避免空转。
+const now = ref(Date.now())
+let timer: ReturnType<typeof setInterval> | null = null
+watch(runningCount, (n) => {
+  if (n > 0 && timer == null) {
+    timer = setInterval(() => { now.value = Date.now() }, 200)
+  } else if (n === 0 && timer != null) {
+    now.value = Date.now()  // 收表前再刷一次，让停下的瞬间数值贴近真实
+    clearInterval(timer); timer = null
   }
-}, { deep: true })
+}, { immediate: true })
+onUnmounted(() => { if (timer != null) { clearInterval(timer); timer = null } })
+
+// 把秒数格式化为可读耗时：<60s 显示「12.3s」，≥60s 显示「1分23秒」。
+function formatDuration(sec: number | null | undefined): string {
+  if (sec == null) return ''
+  if (sec < 60) return `${sec}s`
+  const m = Math.floor(sec / 60)
+  const s = Math.round(sec % 60)
+  return `${m}分${s}秒`
+}
+
+// 单个 agent 的显示耗时：运行中用秒表现算（保留 1 位小数），完成/失败后用后端权威值。
+function agentSeconds(a: { status: string; startedAt: number | null; elapsed: number | null }): number | null {
+  if (a.status === 'running' && a.startedAt != null) {
+    return Math.round((now.value - a.startedAt) / 100) / 10
+  }
+  return a.elapsed
+}
+
+// 当前查看任务的总耗时：完成后用后端权威值，运行中用秒表从 startedAt 现算。
+const totalSeconds = computed<number | null>(() => {
+  if (elapsed.value != null) return elapsed.value
+  if (isGenerating.value && taskStartedAt.value != null) {
+    return Math.round((now.value - taskStartedAt.value) / 100) / 10
+  }
+  return null
+})
+
+// 展开的 agent 卡片（可多开）。默认全部收起，只有用户手动点开才展开——不做任何自动展开。
+const openAgents = ref<number[]>([])
 
 // 历史记录：先拉批次汇总渲染折叠卡片，点开某批时再懒加载该批全量用例。
 // 老实现是一次拉 /cases（写死 200 上限），大批次会被截断——现在按 batch_id 精确拉。
@@ -279,7 +307,12 @@ async function downloadBatch(batch: BatchSummary) {
       <div class="output-panel">
         <el-card>
           <template #header>
-            <div class="results-toolbar"><span>生成结果</span><el-button v-if="cases.length" size="small" type="success" @click="downloadCases">下载 Excel</el-button></div>
+            <div class="results-toolbar">
+              <span>生成结果
+                <span v-if="totalSeconds != null" class="total-time">· 总耗时 ⏱ {{ formatDuration(totalSeconds) }}</span>
+              </span>
+              <el-button v-if="cases.length" size="small" type="success" @click="downloadCases">下载 Excel</el-button>
+            </div>
           </template>
           <el-alert v-if="isGenerating" :title="genProgress || '生成中...'" type="info" :closable="false" />
           <div v-if="modules.length" class="module-list">
@@ -299,6 +332,7 @@ async function downloadBatch(batch: BatchSummary) {
                   <span class="agent-name">{{ a.module }}</span>
                   <span class="agent-meta">
                     {{ a.status === 'running' ? '生成中…' : a.status === 'failed' ? '失败' : `${a.cases.length} 条` }}
+                    <span v-if="agentSeconds(a) != null" class="agent-time">· ⏱ {{ formatDuration(agentSeconds(a)) }}</span>
                   </span>
                 </template>
                 <!-- 完成：展示解析好的用例列表 -->
@@ -385,12 +419,14 @@ async function downloadBatch(batch: BatchSummary) {
 <style scoped>
 .gen-view { max-width: 1200px; margin: 0 auto; }
 .gen-container { display: flex; flex-direction: column; gap: 24px; }
-.top-panels { display: flex; gap: 24px; align-items: stretch; }
-.input-panel { flex: 0 0 420px; }
+/* 用 grid 固定两栏：左栏 420px，右栏 minmax(320px,1fr) 保证下限，任何生成阶段都不会被挤成 0
+   宽而消失（flex 布局下 input-panel 不能收缩、knowledge-panel min-width:0 会被压没的根因）。 */
+.top-panels { display: grid; grid-template-columns: 420px minmax(320px, 1fr); gap: 24px; align-items: stretch; }
+.input-panel { min-width: 0; }
 /* 撑满宽度的相邻按钮之间，去掉 Element Plus 默认的 margin-left，避免整行按钮被右推、看起来不居中 */
 .input-panel :deep(.el-button + .el-button) { margin-left: 0; }
 .input-panel > :deep(.el-card), .knowledge-panel > :deep(.el-card) { height: 100%; }
-.knowledge-panel { flex: 1; min-width: 0; }
+.knowledge-panel { min-width: 0; }
 /* 命中知识过多时栏内滚动，不撑长整个页面 */
 .knowledge-body { max-height: 60vh; overflow-y: auto; padding-right: 4px; }
 .output-panel { width: 100%; }
@@ -408,10 +444,12 @@ async function downloadBatch(batch: BatchSummary) {
 .agent-ico.failed { color: #F56C6C; font-weight: bold; }
 .agent-name { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-meta { flex-shrink: 0; font-size: 12px; color: #909399; margin-left: 8px; }
+.agent-time { color: #409EFF; }
 .agent-empty { font-size: 13px; color: #909399; padding: 6px 0; }
 .agent-case { padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: 13px; }
 .agent-case-line { color: #606266; margin-top: 2px; }
 .final-cases-title { font-size: 14px; font-weight: 600; color: #303133; margin: 12px 0 8px; }
+.total-time { font-weight: 400; font-size: 13px; color: #409EFF; }
 .match-group { margin-bottom: 14px; }
 .match-group-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 13px; font-weight: 600; color: #303133; }
 .match-item { padding: 8px 10px; margin-bottom: 8px; border: 1px solid #ebeef5; border-radius: 8px; background: #fafafa; }
@@ -441,7 +479,7 @@ async function downloadBatch(batch: BatchSummary) {
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @media (max-width: 900px) {
-  .top-panels { flex-direction: column; }
-  .input-panel { flex: none; }
+  /* 窄屏改为单列纵向堆叠，两栏各占满整行 */
+  .top-panels { grid-template-columns: 1fr; }
 }
 </style>

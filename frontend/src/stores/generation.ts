@@ -14,6 +14,8 @@ interface AgentState {
   thinkText: string         // 该 agent 的思考流（reasoning_content，思考阶段展示）
   streamText: string        // 该 agent 的实时原始流（生成中展示）
   cases: GeneratedTestCase[] // 完成后解析好的用例（完成后展示，替代流文本）
+  startedAt: number | null  // 该 agent 开始生成的客户端时间戳(ms)，用于运行中实时计时
+  elapsed: number | null    // 该 agent 生成耗时（秒），完成/失败后由后端下发（权威值）
 }
 
 // 单个生成任务的前端状态。多个任务并行时各自独立，互不影响。
@@ -29,6 +31,8 @@ interface TaskState {
   knowledgeCounts: Record<string, number>
   knowledgeMatches: KnowledgeMatches
   validationWarnings: any[]
+  startedAt: number | null  // 本次生成开始的客户端时间戳(ms)，用于运行中实时计时
+  elapsed: number | null    // 本次生成总耗时（秒），complete 事件下发（权威值）
 }
 
 function newTaskState(taskId: string, title: string): TaskState {
@@ -40,6 +44,7 @@ function newTaskState(taskId: string, title: string): TaskState {
     taskId, title, status: 'running',
     genProgress: '正在准备...', streamText: '', modules: [], agents: [],
     cases: [], knowledgeCounts: {}, knowledgeMatches: {}, validationWarnings: [],
+    startedAt: Date.now(), elapsed: null,
   }) as TaskState
 }
 
@@ -83,6 +88,10 @@ export const useGenerationStore = defineStore('generation', () => {
   const knowledgeMatches = computed(() => current.value?.knowledgeMatches ?? {})
   const validationWarnings = computed(() => current.value?.validationWarnings ?? [])
   const taskTitle = computed(() => current.value?.title ?? '')
+  // 当前查看任务的总生成耗时（秒），未完成时为 null（此时改用 taskStartedAt 实时计时）
+  const elapsed = computed(() => current.value?.elapsed ?? null)
+  // 当前查看任务开始计时的客户端时间戳(ms)，供运行中实时显示总耗时
+  const taskStartedAt = computed(() => current.value?.startedAt ?? null)
   // 当前查看的任务是否在生成中（用于结果区的加载态）
   const isGenerating = computed(() => current.value?.status === 'running')
 
@@ -131,9 +140,10 @@ export const useGenerationStore = defineStore('generation', () => {
       t.modules = event.modules || []
     } else if (event.type === 'module_start') {
       // 某 agent 开始跑：建卡或激活已有卡（重连重放时可能重复收到，按 index 幂等）。
+      // startedAt 记录客户端开始计时的时刻，运行中据此实时递增显示耗时。
       const a = t.agents.find(x => x.index === event.index)
-      if (a) { a.status = 'running' }
-      else { t.agents.push({ index: event.index, module: event.module, status: 'running', thinkText: '', streamText: '', cases: [] }) }
+      if (a) { a.status = 'running'; if (a.startedAt == null) a.startedAt = Date.now() }
+      else { t.agents.push({ index: event.index, module: event.module, status: 'running', thinkText: '', streamText: '', cases: [], startedAt: Date.now(), elapsed: null }) }
     } else if (event.type === 'module_thinking') {
       // 该 agent 的思考流：追加到它自己的思考缓冲区，思考阶段展示，避免干等。
       const a = t.agents.find(x => x.index === event.index)
@@ -143,12 +153,12 @@ export const useGenerationStore = defineStore('generation', () => {
       const a = t.agents.find(x => x.index === event.index)
       if (a) a.streamText += event.text
     } else if (event.type === 'module_done') {
-      // 该 agent 完成：置完成态，卡片改为展示解析好的用例列表。
+      // 该 agent 完成：置完成态，卡片改为展示解析好的用例列表，并记录耗时。
       const a = t.agents.find(x => x.index === event.index)
-      if (a) { a.status = 'done'; a.cases = event.cases || [] }
+      if (a) { a.status = 'done'; a.cases = event.cases || []; a.elapsed = event.elapsed ?? null }
     } else if (event.type === 'module_failed') {
       const a = t.agents.find(x => x.index === event.index)
-      if (a) a.status = 'failed'
+      if (a) { a.status = 'failed'; a.elapsed = event.elapsed ?? null }
     } else if (event.type === 'knowledge') {
       // 检索一结束就展示命中的知识，不用等 complete。
       t.knowledgeCounts = event.knowledge_used || {}
@@ -159,6 +169,7 @@ export const useGenerationStore = defineStore('generation', () => {
       t.knowledgeCounts = event.knowledge_used || {}
       t.knowledgeMatches = event.knowledge_matches || {}
       t.validationWarnings = (event.validation_warnings as any[]) || []
+      t.elapsed = event.elapsed ?? null
       onComplete()
     } else if (event.type === 'error') {
       throw new Error(event.message)
@@ -285,6 +296,8 @@ export const useGenerationStore = defineStore('generation', () => {
     knowledgeMatches,
     validationWarnings,
     taskTitle,
+    elapsed,
+    taskStartedAt,
     historyDirty,
     fetchKbs,
     fetchHistory,
