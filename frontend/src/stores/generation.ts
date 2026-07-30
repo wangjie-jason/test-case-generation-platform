@@ -14,6 +14,7 @@ interface AgentState {
   thinkText: string         // 该 agent 的思考流（reasoning_content，思考阶段展示）
   streamText: string        // 该 agent 的实时原始流（生成中展示）
   cases: GeneratedTestCase[] // 完成后解析好的用例（完成后展示，替代流文本）
+  summary: string           // 完成后的一句话小结（评审：保留N删M；补充：新增N条）
   startedAt: number | null  // 该 agent 开始生成的客户端时间戳(ms)，用于运行中实时计时
   elapsed: number | null    // 该 agent 生成耗时（秒），完成/失败后由后端下发（权威值）
 }
@@ -27,6 +28,8 @@ interface TaskState {
   streamText: string
   modules: string[]
   agents: AgentState[]
+  reviewAgents: AgentState[]      // 评审阶段：每个模块分组一个评审 agent 卡片
+  supplementAgents: AgentState[]  // 补充阶段：被删场景/遗漏场景各一个补充 agent 卡片
   cases: GeneratedTestCase[]
   knowledgeCounts: Record<string, number>
   knowledgeMatches: KnowledgeMatches
@@ -43,6 +46,7 @@ function newTaskState(taskId: string, title: string): TaskState {
   return reactive({
     taskId, title, status: 'running',
     genProgress: '正在准备...', streamText: '', modules: [], agents: [],
+    reviewAgents: [], supplementAgents: [],
     cases: [], knowledgeCounts: {}, knowledgeMatches: {}, validationWarnings: [],
     startedAt: Date.now(), elapsed: null,
   }) as TaskState
@@ -83,6 +87,8 @@ export const useGenerationStore = defineStore('generation', () => {
   const streamText = computed(() => current.value?.streamText ?? '')
   const modules = computed(() => current.value?.modules ?? [])
   const agents = computed(() => current.value?.agents ?? [])
+  const reviewAgents = computed(() => current.value?.reviewAgents ?? [])
+  const supplementAgents = computed(() => current.value?.supplementAgents ?? [])
   const cases = computed(() => current.value?.cases ?? [])
   const knowledgeCounts = computed(() => current.value?.knowledgeCounts ?? {})
   const knowledgeMatches = computed(() => current.value?.knowledgeMatches ?? {})
@@ -127,6 +133,40 @@ export const useGenerationStore = defineStore('generation', () => {
     }
   }
 
+  // 处理评审/补充阶段的多 agent 事件（与生成阶段同构，复用 AgentState）。
+  // prefix 为 'review_' | 'supplement_'，去掉前缀得到 start/thinking/chunk/done/failed。
+  // 断线重连会重放事件，按 index 幂等建卡/更新。
+  function _handleAgentEvent(list: AgentState[], prefix: string, event: any) {
+    const kind = event.type.slice(prefix.length)
+    if (kind === 'start') {
+      const a = list.find(x => x.index === event.index)
+      if (a) { a.status = 'running'; if (a.startedAt == null) a.startedAt = Date.now() }
+      else { list.push({ index: event.index, module: event.module, status: 'running', thinkText: '', streamText: '', cases: [], summary: '', startedAt: Date.now(), elapsed: null }) }
+      return
+    }
+    const a = list.find(x => x.index === event.index)
+    if (!a) return
+    if (kind === 'thinking') {
+      a.thinkText += event.text
+    } else if (kind === 'chunk') {
+      a.streamText += event.text
+    } else if (kind === 'done') {
+      a.status = 'done'
+      a.elapsed = event.elapsed ?? null
+      // 评审：保留 N 删 M；补充：新增 N 条。据事件字段生成小结。
+      if (typeof event.deleted === 'number' || typeof event.kept === 'number') {
+        a.summary = `保留 ${event.kept ?? 0} 条，删除 ${event.deleted ?? 0} 条`
+      } else if (typeof event.count === 'number') {
+        a.summary = `新增 ${event.count} 条`
+      } else {
+        a.summary = '完成'
+      }
+    } else if (kind === 'failed') {
+      a.status = 'failed'
+      a.elapsed = event.elapsed ?? null
+    }
+  }
+
   // 处理单个 SSE 事件，更新对应任务的状态。首发与重连共用。
   function _handleEvent(t: TaskState, event: GenerateStreamEvent, onComplete: () => void) {
     if (event.type === 'progress') {
@@ -143,7 +183,7 @@ export const useGenerationStore = defineStore('generation', () => {
       // startedAt 记录客户端开始计时的时刻，运行中据此实时递增显示耗时。
       const a = t.agents.find(x => x.index === event.index)
       if (a) { a.status = 'running'; if (a.startedAt == null) a.startedAt = Date.now() }
-      else { t.agents.push({ index: event.index, module: event.module, status: 'running', thinkText: '', streamText: '', cases: [], startedAt: Date.now(), elapsed: null }) }
+      else { t.agents.push({ index: event.index, module: event.module, status: 'running', thinkText: '', streamText: '', cases: [], summary: '', startedAt: Date.now(), elapsed: null }) }
     } else if (event.type === 'module_thinking') {
       // 该 agent 的思考流：追加到它自己的思考缓冲区，思考阶段展示，避免干等。
       const a = t.agents.find(x => x.index === event.index)
@@ -159,6 +199,12 @@ export const useGenerationStore = defineStore('generation', () => {
     } else if (event.type === 'module_failed') {
       const a = t.agents.find(x => x.index === event.index)
       if (a) { a.status = 'failed'; a.elapsed = event.elapsed ?? null }
+    } else if (event.type.startsWith('review_')) {
+      // 评审阶段的多 agent 事件，与生成阶段同构，归档到 reviewAgents。
+      _handleAgentEvent(t.reviewAgents, 'review_', event as any)
+    } else if (event.type.startsWith('supplement_')) {
+      // 补充阶段的多 agent 事件，归档到 supplementAgents。
+      _handleAgentEvent(t.supplementAgents, 'supplement_', event as any)
     } else if (event.type === 'knowledge') {
       // 检索一结束就展示命中的知识，不用等 complete。
       t.knowledgeCounts = event.knowledge_used || {}
@@ -291,6 +337,8 @@ export const useGenerationStore = defineStore('generation', () => {
     streamText,
     modules,
     agents,
+    reviewAgents,
+    supplementAgents,
     cases,
     knowledgeCounts,
     knowledgeMatches,

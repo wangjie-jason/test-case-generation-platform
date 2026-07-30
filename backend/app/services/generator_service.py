@@ -191,25 +191,63 @@ class GeneratorService:
         warnings = await ValidationService.validate_cases(db, all_cases)
 
         # 评审：以测试专家身份逐条判定保留/删除，不改写已生成的用例。
+        # 按【模块】把用例分组，每组一个独立评审 agent 并行跑（与生成阶段同一套
+        # Semaphore 错峰 + 事件队列机制），每个 agent 一张卡片实时流式展示评审过程，
+        # 用户能看到「AI 正在保留/删除哪条、理由是什么」，而不是干等一句静态提示。
         if _has_valid_cases(all_cases):
-            yield {"type": "progress", "stage": "reviewing", "message": "测试专家正在评审用例..."}
-            review = await _review_cases(llm, base_system, all_cases, warnings)
-            kept, deleted = _apply_review(all_cases, review.get("reviews", []))
+            yield {"type": "progress", "stage": "reviewing", "message": "测试专家正在分模块并行评审用例..."}
+            groups = _group_by_module(all_cases)
+            warnings_by_global = {
+                w["case_index"]: w for w in warnings if isinstance(w.get("case_index"), int)
+            }
+            review = {"reviews": [], "gaps": []}
+            async for ev in _parallel_agents(
+                groups,
+                lambda i, g, emit: _review_worker(i, g, emit, base_system, warnings_by_global),
+                phase="review",
+            ):
+                if ev["type"] == "_results":
+                    for r in ev["results"]:
+                        if isinstance(r, dict):
+                            review["reviews"].extend(r.get("reviews", []))
+                            review["gaps"].extend(r.get("gaps", []))
+                else:
+                    yield ev
+
+            kept, deleted = _apply_review(all_cases, review["reviews"])
             if _has_valid_cases(kept):
                 all_cases = kept
             else:
                 deleted = []  # 评审把用例全删了，判定不可信，全部保留
-            gaps = review.get("gaps", [])
+            gaps = review["gaps"]
             if deleted:
                 yield {"type": "progress", "stage": "reviewing", "message": f"评审删除 {len(deleted)} 条问题用例，保留 {len(all_cases)} 条"}
 
-            # 补充：仅针对被删场景与遗漏场景生成新用例，追加到保留的用例后。
+            # 补充：把被删场景按模块分组、遗漏场景单独一组，每组一个补充 agent 并行生成，
+            # 各自一张卡片实时流式展示。生成后跨 agent + 与保留用例统一按 title 去重再合并。
             if deleted or gaps:
-                yield {"type": "progress", "stage": "supplementing", "message": "正在补充遗漏场景的用例..."}
-                supp_output = ""
-                async for chunk in _supplement_stream(llm, base_system, all_cases, deleted, gaps):
-                    supp_output += chunk; yield {"type": "chunk", "text": chunk}
-                supplements = [c for c in _parse_cases(supp_output) if c.get("title") and not c.get("error")]
+                yield {"type": "progress", "stage": "supplementing", "message": "正在分模块并行补充遗漏场景的用例..."}
+                supp_tasks = _build_supplement_tasks(deleted, gaps)
+                collected: list[dict] = []
+                async for ev in _parallel_agents(
+                    supp_tasks,
+                    lambda i, it, emit: _supplement_worker(i, it, emit, base_system, all_cases),
+                    phase="supplement",
+                ):
+                    if ev["type"] == "_results":
+                        for r in ev["results"]:
+                            if isinstance(r, list):
+                                collected.extend(r)
+                    else:
+                        yield ev
+                # 跨 agent + 与已保留用例统一去重（并行下无法实时共享 title，完成后统一收口）。
+                existing = {_title_key(c.get("title", "")) for c in all_cases}
+                supplements: list[dict] = []
+                for c in collected:
+                    k = _title_key(c.get("title", ""))
+                    if k and k not in existing:
+                        existing.add(k)
+                        supplements.append(c)
                 if supplements:
                     all_cases = _merge_supplements(all_cases, supplements)
                     yield {"type": "progress", "stage": "supplementing", "message": f"补充 {len(supplements)} 条用例，共 {len(all_cases)} 条"}
@@ -437,60 +475,155 @@ def _review_prompt(cases: list[dict], warnings: list[dict]) -> str:
 }}"""
 
 
-async def _review_cases(llm, system: str, cases: list[dict], warnings: list[dict]) -> dict:
-    """调用 LLM 评审，返回 {reviews:[...], gaps:[...]}；失败时返回空（全部保留）。
+async def _parallel_agents(items: list[dict], worker_factory, phase: str):
+    """通用「多 agent 并行 + 每 agent 卡片实时流」运行器（评审/补充共用）。
 
-    用例数超过 LLM_REVIEW_BATCH_SIZE 时分批并发评审，避免整批 prompt 过长撞超时。
-    每批内 _review_prompt 用局部下标（从 0 起），返回后把 review.index 加上该批的全局
-    偏移，映射回整批下标——_apply_review 依赖全局 index 定位删除项，偏移错了会误删。
+    items: 任务列表，每项是 dict，至少含 "module"（卡片标题）。
+    worker_factory(idx, item, emit) -> 协程，返回 (result, summary)：
+      - result：该 agent 的产物（评审 dict / 补充 list），最终经 _results 事件回传给上层收口。
+      - summary：dict，随 done 事件下发前端展示（评审给 kept/deleted，补充给 count）。
+      - emit(kind, extra) 把流事件推给前端：kind ∈ {thinking, chunk}，
+        最终以 f"{phase}_{kind}" 作为事件 type，带 index。
+    phase: 事件类型前缀（"review" / "supplement"），前端据此归档到对应卡片区。
+
+    与生成阶段共用同一套限流：受 LLM_MODULE_CONCURRENCY 并发上限约束，按
+    LLM_MODULE_STAGGER_DELAY 错峰启动，避免评审/补充突刺撞到套餐限流。
+    汇流队列单点消费，多 agent 的流不会在 yield 层交错。
     """
-    size = max(1, settings.LLM_REVIEW_BATCH_SIZE)
-    if len(cases) <= size:
-        return await _review_one_segment(llm, system, cases, warnings, offset=0)
+    total = len(items)
+    if not total:
+        yield {"type": "_results", "results": []}
+        return
 
-    # 分批：按 size 切段，每段带全局偏移。warnings 里的 case_index 也是全局的，
-    # 按段过滤并回退成局部下标，保证每段 prompt 里的 #编号与该段用例对齐。
-    segments = []
-    for start in range(0, len(cases), size):
-        seg_cases = cases[start:start + size]
-        seg_warnings = [
-            {**w, "case_index": w["case_index"] - start}
-            for w in warnings
-            if isinstance(w.get("case_index"), int) and start <= w["case_index"] < start + len(seg_cases)
-        ]
-        segments.append((start, seg_cases, seg_warnings))
+    sem = asyncio.Semaphore(max(1, settings.LLM_MODULE_CONCURRENCY))
+    stagger = max(0.0, settings.LLM_MODULE_STAGGER_DELAY)
+    event_q: asyncio.Queue = asyncio.Queue()
+    results: list = [None] * total
 
-    # 每段独立 LLMService 实例并发评审（同模块生成，避免共享 last_finish_reason）。
-    results = await asyncio.gather(
-        *[_review_one_segment(LLMService(), system, sc, sw, offset=st) for st, sc, sw in segments],
-        return_exceptions=True,
-    )
-    merged_reviews: list[dict] = []
-    merged_gaps: list[str] = []
-    for r in results:
-        if isinstance(r, dict):
-            merged_reviews.extend(r.get("reviews", []))
-            merged_gaps.extend(r.get("gaps", []))
-        else:
-            logger.warning("某评审分段失败，该段用例默认全部保留：%s", r)
-    return {"reviews": merged_reviews, "gaps": merged_gaps}
+    async def _run(idx: int, item: dict) -> None:
+        if stagger and idx:
+            await asyncio.sleep(idx * stagger)
+        async with sem:
+            started = time.monotonic()
+            module = item.get("module", "")
+            await event_q.put({"kind": "start", "index": idx, "module": module})
+
+            async def emit(kind: str, extra: dict | None = None) -> None:
+                ev = {"kind": kind, "index": idx}
+                if extra:
+                    ev.update(extra)
+                await event_q.put(ev)
+
+            try:
+                res, summary = await worker_factory(idx, item, emit)
+            except Exception:
+                logger.exception("并行 agent[%s] 失败", module or idx)
+                await event_q.put({"kind": "failed", "index": idx, "module": module,
+                                   "elapsed": round(time.monotonic() - started, 1)})
+                return
+            results[idx] = res
+            done_ev = {"kind": "done", "index": idx, "module": module,
+                       "elapsed": round(time.monotonic() - started, 1)}
+            done_ev.update(summary or {})
+            await event_q.put(done_ev)
+
+    tasks = [asyncio.create_task(_run(i, it)) for i, it in enumerate(items)]
+    done_count = 0
+    while done_count < total:
+        ev = await event_q.get()
+        kind = ev.pop("kind")
+        if kind in ("done", "failed"):
+            done_count += 1
+        out = {"type": f"{phase}_{kind}"}
+        out.update(ev)
+        yield out
+    await asyncio.gather(*tasks, return_exceptions=True)
+    yield {"type": "_results", "results": results}
 
 
-async def _review_one_segment(llm, system: str, cases: list[dict], warnings: list[dict], offset: int) -> dict:
-    """评审单段用例，返回 {reviews, gaps}；review.index 已加上 offset 映射回全局下标。"""
-    try:
-        raw = await llm.generate(system, _review_prompt(cases, warnings))
-        parsed = _parse_json_object(raw)
-        if isinstance(parsed, dict):
-            reviews = parsed.get("reviews", [])
-            if offset and isinstance(reviews, list):
-                for rv in reviews:
-                    if isinstance(rv, dict) and isinstance(rv.get("index"), int):
-                        rv["index"] += offset
-            return {"reviews": reviews if isinstance(reviews, list) else [], "gaps": parsed.get("gaps", [])}
-    except Exception:
-        logger.exception("用例评审失败，跳过删除与补充")
-    return {"reviews": [], "gaps": []}
+def _group_by_module(cases: list[dict]) -> list[dict]:
+    """按标题【】里的顶层模块把用例分组，保留每条用例的全局下标（供评审结论映射回整批）。
+    无模块前缀的归入「其它」。返回 [{"module": 名, "items": [(global_idx, case), ...]}]。"""
+    groups: dict[str, list[tuple[int, dict]]] = {}
+    for i, c in enumerate(cases):
+        key = _title_prefix(c.get("title", "")) or "其它"
+        groups.setdefault(key, []).append((i, c))
+    return [{"module": k, "items": v} for k, v in groups.items()]
+
+
+async def _review_worker(idx: int, group: dict, emit, system: str,
+                         warnings_by_global: dict[int, dict]) -> tuple[dict, dict]:
+    """评审单个模块分组：流式吐评审 JSON（思考流经 emit 实时下发），解析后把每条 review
+    的局部 index 映射回全局下标。返回 ({reviews, gaps}, {kept, deleted}) 供上层收口/展示。"""
+    items = group["items"]  # [(global_idx, case), ...]
+    local_cases = [c for _, c in items]
+    # 该组的校验告警按局部下标重映射，保证 prompt 里的 #编号与该组用例对齐。
+    local_warnings = []
+    for local_i, (gi, _) in enumerate(items):
+        w = warnings_by_global.get(gi)
+        if w:
+            local_warnings.append({**w, "case_index": local_i})
+
+    async def on_reasoning(text: str) -> None:
+        if text:
+            await emit("thinking", {"text": text})
+
+    parts: list[str] = []
+    async for piece in LLMService().generate_stream(system, _review_prompt(local_cases, local_warnings),
+                                                    on_reasoning=on_reasoning):
+        parts.append(piece)
+        if piece:
+            await emit("chunk", {"text": piece})
+
+    parsed = _parse_json_object("".join(parts))
+    reviews: list[dict] = []
+    gaps: list = []
+    if isinstance(parsed, dict):
+        raw_reviews = parsed.get("reviews", [])
+        if isinstance(raw_reviews, list):
+            for r in raw_reviews:
+                if isinstance(r, dict) and isinstance(r.get("index"), int):
+                    li = r["index"]
+                    if 0 <= li < len(items):
+                        reviews.append({**r, "index": items[li][0]})  # 局部 → 全局
+        raw_gaps = parsed.get("gaps", [])
+        gaps = raw_gaps if isinstance(raw_gaps, list) else []
+    deleted = sum(1 for r in reviews if r.get("verdict") == "delete")
+    return {"reviews": reviews, "gaps": gaps}, {"kept": len(items) - deleted, "deleted": deleted}
+
+
+def _build_supplement_tasks(deleted: list[dict], gaps: list[str]) -> list[dict]:
+    """把补充工作拆成可并行的任务：被删用例按模块分组各一任务，遗漏场景单独一任务。
+    返回 [{"module": 卡片标题, "deleted": [...], "gaps": [...]}]。"""
+    tasks: list[dict] = []
+    by_mod: dict[str, list[dict]] = {}
+    for c in deleted:
+        key = _title_prefix(c.get("title", "")) or "其它"
+        by_mod.setdefault(key, []).append(c)
+    for mod, dels in by_mod.items():
+        tasks.append({"module": f"{mod}（补被删场景）", "deleted": dels, "gaps": []})
+    if gaps:
+        tasks.append({"module": "遗漏场景补充", "deleted": [], "gaps": list(gaps)})
+    return tasks
+
+
+async def _supplement_worker(idx: int, item: dict, emit, system: str,
+                             kept: list[dict]) -> tuple[list[dict], dict]:
+    """补充单个任务：流式生成新用例（思考流经 emit 下发），解析出用例列表返回。
+    kept 用于 prompt 里声明「已有标题勿重复」，跨 agent 的最终去重由上层统一收口。"""
+    async def on_reasoning(text: str) -> None:
+        if text:
+            await emit("thinking", {"text": text})
+
+    parts: list[str] = []
+    prompt = _supplement_prompt(kept, item.get("deleted", []), item.get("gaps", []))
+    async for piece in LLMService().generate_stream(system, prompt, on_reasoning=on_reasoning):
+        parts.append(piece)
+        if piece:
+            await emit("chunk", {"text": piece})
+
+    cases = [c for c in _parse_cases("".join(parts)) if c.get("title") and not c.get("error")]
+    return cases, {"count": len(cases)}
 
 
 def _apply_review(cases: list[dict], reviews: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -550,11 +683,6 @@ def _supplement_prompt(kept: list[dict], deleted: list[dict], gaps: list[str]) -
 {todo}
 
 只输出新增用例的 JSON 数组（不要 markdown 代码块），格式与原用例一致（title/priority/precondition/steps/expected_result/knowledge_refs）。若无需补充则输出 []。"""
-
-
-async def _supplement_stream(llm, system: str, kept: list[dict], deleted: list[dict], gaps: list[str]):
-    async for chunk in llm.generate_stream(system, _supplement_prompt(kept, deleted, gaps)):
-        yield chunk
 
 
 def _parse_json_object(raw: str) -> dict | None:
