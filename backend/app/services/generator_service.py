@@ -129,6 +129,10 @@ class GeneratorService:
             tasks = [asyncio.create_task(_run_module(i, m)) for i, m in enumerate(modules)]
 
             # 单点消费队列并 yield，直到所有模块都产出了终态（done/failed）。
+            # 各模块并发完成、到达时序不定，若按完成顺序直接 extend，模块间顺序就与切割
+            # 时的 modules 列表错位。这里按模块下标（即 modules 的下标）暂存各自 batch，
+            # 全部结束后再按 0..total-1 顺序拼接，保证最终用例严格按切割模块顺序排列。
+            batches_by_index: dict[int, list[dict]] = {}
             done_count = 0
             while done_count < total:
                 ev = await event_q.get()
@@ -148,13 +152,16 @@ class GeneratorService:
                     batch = ev.get("cases") or []
                     if batch:
                         logger.info("模块[%s]生成 %d 条用例", ev["module"], len(batch))
-                        all_cases.extend(batch)
+                        batches_by_index[ev["index"]] = batch
                     # 把该模块解析出的用例随完成事件下发，前端用它把卡片从「流式文本」
                     # 切换为解析好的用例列表。elapsed 为该模块生成耗时（秒）。
                     yield {"type": "module_done", "index": ev["index"], "module": ev["module"], "cases": batch,
                            "elapsed": ev.get("elapsed")}
                     yield {"type": "progress", "stage": "generating",
                            "message": f"模块生成进度 {done_count}/{total}：{ev['module']}"}
+            # 按模块下标（modules 的顺序）拼接，抹平并发完成时序带来的乱序。
+            for idx in range(total):
+                all_cases.extend(batches_by_index.get(idx, []))
             # 兜底：确保所有任务已结束（正常情况下 done_count 达标时它们都已 return）。
             await asyncio.gather(*tasks, return_exceptions=True)
         else:
@@ -646,20 +653,45 @@ def _title_prefix(title: str) -> str:
     return m.group(1).split("-")[0].strip()
 
 
+def _title_path(title: str) -> list[str]:
+    """取标题里【】内的完整模块层级路径（按 - 逐级拆分），用于子模块级就近归组。
+    如【PC端-工作台-统计概览】xxx → ['PC端', '工作台', '统计概览']；无前缀则返回 []。"""
+    m = re.match(r"\s*【\s*([^】]+?)\s*】", title or "")
+    if not m:
+        return []
+    return [seg.strip() for seg in m.group(1).split("-") if seg.strip()]
+
+
+def _common_prefix_len(a: list[str], b: list[str]) -> int:
+    """两条模块路径逐级比较，返回从顶层开始连续相同的层数（越大越同属细分子模块）。"""
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
 def _merge_supplements(kept: list[dict], supplements: list[dict]) -> list[dict]:
     """把补充用例就近插到同模块用例后面，而不是一律追加到末尾。
 
-    以标题【】里的顶层模块为归组依据：每条补充用例插到 kept 中该模块最后一条之后；
-    找不到同模块（新模块）的补充按原顺序追加到末尾。这样评审补充的用例能与相关模块挨着。
+    以标题【】里的模块层级路径为归组依据（细化到子模块）：为每条补充用例在 kept 中
+    找与其路径公共前缀最长的那些用例，插到其中最后一条之后——同顶层模块里优先挨着
+    同一子功能。顶层模块都对不上（全新模块）的补充按原顺序追加到末尾。
     """
     result = list(kept)
     for supp in supplements:
-        prefix = _title_prefix(supp.get("title", ""))
+        supp_path = _title_path(supp.get("title", ""))
         insert_at = None
-        if prefix:
+        best_score = 0
+        if supp_path:
             for i, c in enumerate(result):
-                if _title_prefix(c.get("title", "")) == prefix:
-                    insert_at = i + 1  # 记录同模块最后一条的下一个位置
+                score = _common_prefix_len(_title_path(c.get("title", "")), supp_path)
+                # 至少顶层模块相同（score>=1）才算同模块；公共前缀更长的（同子模块）优先，
+                # 同分时取更靠后的位置，保证插到该（子）模块最后一条之后。
+                if score >= 1 and score >= best_score:
+                    best_score = score
+                    insert_at = i + 1
         if insert_at is None:
             result.append(supp)
         else:
