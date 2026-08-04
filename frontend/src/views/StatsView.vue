@@ -17,7 +17,7 @@ const loading = ref(false)
 const hallucinationLabels: Record<string, string> = {
   field_hallucination: '字段幻觉', rule_hallucination: '规则幻觉',
   context_missing: '上下文缺失', style_mismatch: '风格不一致',
-  discard: '丢弃',
+  duplicate: '重复',
 }
 
 onMounted(async () => {

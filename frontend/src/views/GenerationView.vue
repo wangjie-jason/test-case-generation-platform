@@ -175,16 +175,26 @@ const batchGroups = computed(() => batches.value.map(b => ({
   loading: !!loadingBatch.value[b.batch_id],
 })))
 
-async function downloadBatch(batch: BatchSummary) {
+async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'all') {
   try {
     // 保证下载到的是全量：即使用户没展开也现拉一次。
     const items = batchItems.value[batch.batch_id] || await generationApi.listCases(batch.batch_id)
     batchItems.value[batch.batch_id] = items
-    const blob = await generationApi.exportCases(items)
+    // 「仅通过」取人工审核 approved 的用例。被驳回后又人工编辑过的（edited）仍算 rejected，
+    // 因为 PATCH /cases/{id} 明确不碰 review 记录——审核结论只由审核动作决定。
+    const picked = scope === 'approved'
+      ? items.filter((c: any) => c.review?.status === 'approved')
+      : items
+    if (!picked.length) {
+      ElMessage.warning(scope === 'approved' ? '该批次暂无审核通过的用例' : '该批次没有用例')
+      return
+    }
+    const blob = await generationApi.exportCases(picked)
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    const name = batch.req_text || batch.created_at?.slice(0, 10) || 'test_cases'
-    a.download = `${name}.xlsx`
+    const base = batch.req_text || batch.created_at?.slice(0, 10) || 'test_cases'
+    // 文件名带上范围，避免「全部」和「仅通过」两份下载下来同名难分辨。
+    a.download = `${base}${scope === 'approved' ? '_已通过' : ''}.xlsx`
     a.click()
     URL.revokeObjectURL(a.href)
   } catch (e: any) { ElMessage.error(e.message) }
@@ -453,7 +463,16 @@ async function downloadBatch(batch: BatchSummary) {
         <div v-for="b in batchGroups" :key="b.batch_id" class="batch-card">
           <div class="batch-header">
             <div><strong class="batch-name">{{ b.req_text?.slice(0, 60) || '未命名需求' }}</strong><span class="batch-meta-info">{{ b.total }} 条 · {{ b.created_at?.slice(0, 16) }}</span></div>
-            <el-button size="small" type="success" @click="downloadBatch(b)">下载 Excel</el-button>
+            <el-dropdown split-button size="small" type="success" @click="downloadBatch(b, 'all')"
+                         @command="(scope: 'all' | 'approved') => downloadBatch(b, scope)">
+              下载 Excel
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="all">全部用例</el-dropdown-item>
+                  <el-dropdown-item command="approved">仅通过用例</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
           <el-collapse @change="(val: string | string[]) => (Array.isArray(val) ? val : [val]).includes(b.batch_id) && loadBatchItems(b.batch_id)">
             <el-collapse-item :title="`展开 ${b.total} 条用例`" :name="b.batch_id">
