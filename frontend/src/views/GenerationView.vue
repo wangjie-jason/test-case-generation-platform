@@ -180,8 +180,8 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
     // 保证下载到的是全量：即使用户没展开也现拉一次。
     const items = batchItems.value[batch.batch_id] || await generationApi.listCases(batch.batch_id)
     batchItems.value[batch.batch_id] = items
-    // 「仅通过」取人工审核 approved 的用例。被驳回后又人工编辑过的（edited）仍算 rejected，
-    // 因为 PATCH /cases/{id} 明确不碰 review 记录——审核结论只由审核动作决定。
+    // 「仅通过」只认审核动作的结论 review.status === 'approved'，与用例是否被人工
+    // 编辑过（edited）无关：编辑后点了通过就能下载，没点通过就不算。
     const picked = scope === 'approved'
       ? items.filter((c: any) => c.review?.status === 'approved')
       : items
