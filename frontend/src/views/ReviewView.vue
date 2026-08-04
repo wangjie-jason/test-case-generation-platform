@@ -14,7 +14,7 @@ const rejectReasons = [
   { value: 'rule_hallucination', label: '规则幻觉' },
   { value: 'context_missing', label: '上下文缺失' },
   { value: 'style_mismatch', label: '风格不一致' },
-  { value: 'discard', label: '丢弃' },
+  { value: 'duplicate', label: '重复' },
 ]
 
 // 展示的批次：把汇总里已知的 total/reviewed/approved 与懒加载的 items 拼起来。
