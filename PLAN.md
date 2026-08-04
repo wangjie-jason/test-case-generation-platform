@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 实施计划
 
-> 版本 v1.6 | 更新 2026-07-30 | 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
+> 版本 v1.7 | 更新 2026-08-04 | 用例顺序子功能级聚合（resort_batch 运维脚本）+ 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
 
 ## 当前状态
 - **架构变更**: Project/Module → KnowledgeBase（知识库为核心，卡片式管理）
@@ -27,6 +27,7 @@
 | 429 处理       | 限额/限流不重试直接报错，5xx 服务端抖动保留指数退避重试                                    | ✓    |
 | 死代码清理     | 删除无人调用的 POST /generate、/generate/stream、GenerateResponse 及相关非流式函数         | ✓    |
 | 用例编辑       | 审核阶段可微调 title/precondition/steps/expected_result，只改内容不碰 review 状态（保留原 reject_reason 信号），加 `edited` 标记 | ✓    |
+| 用例顺序       | 顶层模块按需求切割顺序成块，块内按标题层级路径聚合到子功能级；已落库批次用 `scripts/resort_batch.py` 重排 `created_at` | ✓    |
 
 ## Context
 
@@ -63,6 +64,7 @@
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
+│   ├── scripts/             # 运维脚本（手工执行）：delete_batch / backfill_case_priority / reindex_vectors / resort_batch
 │   └── app/
 │       ├── main.py
 │       ├── config.py

@@ -19,6 +19,7 @@
 | v0.14 | 2026-07-29 | 模块**并行**生成（替代 v0.12 的串行 for）：`LLM_MODULE_CONCURRENCY` 并发上限 + `LLM_MODULE_STAGGER_DELAY` 错峰启动，各模块独立 `LLMService` 实例，`asyncio.Queue` 汇流单点转发。模块内改**真流式**（`generate_stream` + `on_chunk` 回调），SSE 新增 `module_start/module_chunk/module_done/module_failed` 事件，前端按 agent 卡片分区展示各自的流（可多开，完成后卡内换为解析好的用例列表）。评审改**分批并发**（`LLM_REVIEW_BATCH_SIZE`，index 偏移映射回全局）防大批次超时；`generate_stream` 超时改「空手超时才退避重试」，429 纳入退避重试集。
 | v0.15 | 2026-07-30 | 生成耗时可视化：后端 `time.monotonic()` 记录每个模块生成耗时（不含错峰/排队等待，随 `module_done`/`module_failed` 事件带 `elapsed` 秒）与整体总耗时（随 `complete` 事件带 `elapsed`），前端在各 agent 卡片标题旁显示 ⏱ 耗时、结果区标题显示总耗时。
 | v0.16 | 2026-07-30 | 评审/补充改**按模块并行 + 流式卡片**：评审按【模块】分组，每个模块一个独立评审 agent 并行跑，SSE 新增 `review_start/review_thinking/review_chunk/review_done/review_failed` 事件，前端 `reviewAgents` 卡片区实时展示「AI 正在保留/删除哪条及其理由」。补充按被删模块分组 + 遗漏场景单独一组，各一个补充 agent 并行流式生成，SSE 新增 `supplement_*` 事件，前端 `supplementAgents` 卡片区实时展示。共用生成阶段同一套 `Semaphore`+错峰限流与 `asyncio.Queue` 汇流机制（`_parallel_agents` 通用运行器）。取代 v0.14 的评审分批并发（`LLM_REVIEW_BATCH_SIZE` 阈值 300 实际几乎不触发、且非流式看不到过程）。|
+| v0.17 | 2026-08-04 | 用例顺序细化到**子功能级**：`_merge_supplements` 的最长公共前缀就近插入只保证顶层模块聚合，同模块内不同子功能仍可能交错（补充用例落在模块块尾部）。新增运维脚本 `backend/scripts/resort_batch.py`，对已落库批次重排 `created_at`（列表接口按其升序返回）：先按顶层模块切连续块保持切割顺序，块内按标题【】层级路径做层级化稳定排序（每级次序 = 该级路径在块内首次出现位置）。|
 
 > 后续每次修改设计时，在此表追加一行（版本、日期、主要变更）。
 
@@ -274,6 +275,8 @@ VIP免运费 | user_level='vip' → freight=0 | 硬规则   | 订单模块 | PRD
 #### 生成后评审（保留-删除-补充，非整批重写）
 
 生成完成后，由 LLM 以测试评审专家身份**逐条判定保留/删除**（引用错字段、违反规则、重复、含糊不可执行、偏离需求才删），保留的用例**不改写**。评审按【模块】分组并发，每个模块一个独立 agent 并行跑，SSE 流式实时吐出「AI 正在保留/删除哪条、理由是什么」，前端 `reviewAgents` 卡片区展示。再针对被删场景与遗漏场景**定向补充**新用例——被删场景按模块分组 + 遗漏场景单独一组，各一个补充 agent 并行流式生成，前端 `supplementAgents` 卡片区展示；跨 agent + 与保留用例统一按 title 精确去重后合并。补充用例按标题【】里的顶层模块**就近插入**到同模块用例之后（而非一律追加到末尾），保证同模块用例挨在一起；找不到同模块的新模块补充仍追加末尾。避免早期「整批重写」把合格用例一并改掉。
+
+**用例顺序（子功能级聚合）**：`_merge_supplements` 的就近插入只保证顶层模块聚合，同模块内不同子功能仍会交错（补充用例常落到模块块的尾部）。对已落库批次用 `backend/scripts/resort_batch.py` 重排：列表接口按 `created_at` 升序返回，脚本即按目标顺序重写 `created_at`（原最早时间起逐条 +1 秒）。规则两层——① 先按顶层模块切成连续块，块的先后**不变**（顶层顺序来自需求切割的 modules 列表，是人给定的阅读顺序）；② 块内按标题【】的层级路径做**层级化稳定排序**，每级次序取该级路径在块内的首次出现位置，于是补充用例归到自己所属子功能那一段，同一子功能内保持原相对顺序。用法 `python -m scripts.resort_batch <batch_id> [--dry-run]`。
 
 #### 并行生成与多人隔离
 
