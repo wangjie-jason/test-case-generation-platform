@@ -9,7 +9,7 @@
 """
 import pytest
 
-from app.services.generator_service import _merge_supplements
+from app.utils.case_grouping import merge_supplements
 from app.utils.case_ordering import order_cases
 
 # ---------------------------------------------------------------- helpers
@@ -153,7 +153,7 @@ def test_无处归位的补充追加到末尾而不丢失(supp_title, why):
 
 
 def test_补充用例出现在所属簇之前也能归位():
-    """_merge_supplements 若把补充插到子模块首条之前，排序仍应把它收进簇里。"""
+    """merge_supplements 若把补充插到子模块首条之前，排序仍应把它收进簇里。"""
     cases = [
         supp("【模块-注册】补充的注册项"),
         case("【模块-登录】记住密码"),
@@ -224,17 +224,17 @@ def test_整批模式也幂等():
     assert titles(batch_order(once)) == titles(once)
 
 
-# ------------------------------------------------- 与 _merge_supplements 的集成
+# ------------------------------------------------- 与 merge_supplements 的集成
 
 def test_经过补充合并后的完整链路():
-    """生成流程实际是 _merge_supplements 再 order_cases，两步合起来才是最终顺序。"""
+    """生成流程实际是 merge_supplements 再 order_cases，两步合起来才是最终顺序。"""
     kept = [
         case("【PC工作台-统计概览】验证问候语显示网格员姓名"),
         case("【PC工作台-统计概览】验证本周走访显示户数"),
         case("【PC端我的任务-状态筛选】验证默认全部"),
     ]
     supplements = [supp("【PC工作台-统计概览】验证本周走访无数据时显示0户")]
-    out = gen_order(_merge_supplements(kept, supplements))
+    out = gen_order(merge_supplements(kept, supplements))
 
     assert locked_titles(out) == titles(kept), "原有用例顺序不变"
     idx = titles(out).index("【PC工作台-统计概览】验证本周走访无数据时显示0户")

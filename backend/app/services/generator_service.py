@@ -12,6 +12,7 @@ from app.services.llm_service import LLMService
 from app.services.prompt_service import PromptService
 from app.services.retrieval_service import RetrievalService
 from app.services.validation_service import ValidationService
+from app.utils.case_grouping import merge_supplements, title_prefix
 from app.utils.case_ordering import order_cases
 from app.vectorstore.chroma_client import ChromaStore
 
@@ -260,7 +261,7 @@ class GeneratorService:
                         # （生成/补充用例的 source 都是 'ai'，created_at 只是写库时间）。
                         supplements.append({**c, "origin": "supplement"})
                 if supplements:
-                    all_cases = _merge_supplements(all_cases, supplements)
+                    all_cases = merge_supplements(all_cases, supplements)
                     yield {"type": "progress", "stage": "supplementing", "message": f"补充 {len(supplements)} 条用例，共 {len(all_cases)} 条"}
             # 收口排序：让补充用例挨到相关功能点旁边。放在这里有两个原因——
             # ① 必须在 validate_cases 之前：告警按下标引用用例，排完再校验才不会错位；
@@ -568,7 +569,7 @@ def _group_by_module(cases: list[dict]) -> list[dict]:
     无模块前缀的归入「其它」。返回 [{"module": 名, "items": [(global_idx, case), ...]}]。"""
     groups: dict[str, list[tuple[int, dict]]] = {}
     for i, c in enumerate(cases):
-        key = _title_prefix(c.get("title", "")) or "其它"
+        key = title_prefix(c.get("title", "")) or "其它"
         groups.setdefault(key, []).append((i, c))
     return [{"module": k, "items": v} for k, v in groups.items()]
 
@@ -620,7 +621,7 @@ def _build_supplement_tasks(deleted: list[dict], gaps: list[str]) -> list[dict]:
     tasks: list[dict] = []
     by_mod: dict[str, list[dict]] = {}
     for c in deleted:
-        key = _title_prefix(c.get("title", "")) or "其它"
+        key = title_prefix(c.get("title", "")) or "其它"
         by_mod.setdefault(key, []).append(c)
     for mod, dels in by_mod.items():
         tasks.append({"module": f"{mod}（补被删场景）", "deleted": dels, "gaps": []})
@@ -659,59 +660,9 @@ def _apply_review(cases: list[dict], reviews: list[dict]) -> tuple[list[dict], l
     return kept, deleted
 
 
-def _title_prefix(title: str) -> str:
-    """取标题里【】内的模块前缀（去掉 - 后的功能点，只留最顶层模块用于就近归组）。
-    如【PC端-工作台-统计概览】xxx → 'PC端'；无前缀则返回空串。"""
-    m = re.match(r"\s*【\s*([^】]+?)\s*】", title or "")
-    if not m:
-        return ""
-    return m.group(1).split("-")[0].strip()
-
-
-def _title_path(title: str) -> list[str]:
-    """取标题里【】内的完整模块层级路径（按 - 逐级拆分），用于子模块级就近归组。
-    如【PC端-工作台-统计概览】xxx → ['PC端', '工作台', '统计概览']；无前缀则返回 []。"""
-    m = re.match(r"\s*【\s*([^】]+?)\s*】", title or "")
-    if not m:
-        return []
-    return [seg.strip() for seg in m.group(1).split("-") if seg.strip()]
-
-
-def _common_prefix_len(a: list[str], b: list[str]) -> int:
-    """两条模块路径逐级比较，返回从顶层开始连续相同的层数（越大越同属细分子模块）。"""
-    n = 0
-    for x, y in zip(a, b):
-        if x != y:
-            break
-        n += 1
-    return n
-
-
-def _merge_supplements(kept: list[dict], supplements: list[dict]) -> list[dict]:
-    """把补充用例就近插到同模块用例后面，而不是一律追加到末尾。
-
-    以标题【】里的模块层级路径为归组依据（细化到子模块）：为每条补充用例在 kept 中
-    找与其路径公共前缀最长的那些用例，插到其中最后一条之后——同顶层模块里优先挨着
-    同一子功能。顶层模块都对不上（全新模块）的补充按原顺序追加到末尾。
-    """
-    result = list(kept)
-    for supp in supplements:
-        supp_path = _title_path(supp.get("title", ""))
-        insert_at = None
-        best_score = 0
-        if supp_path:
-            for i, c in enumerate(result):
-                score = _common_prefix_len(_title_path(c.get("title", "")), supp_path)
-                # 至少顶层模块相同（score>=1）才算同模块；公共前缀更长的（同子模块）优先，
-                # 同分时取更靠后的位置，保证插到该（子）模块最后一条之后。
-                if score >= 1 and score >= best_score:
-                    best_score = score
-                    insert_at = i + 1
-        if insert_at is None:
-            result.append(supp)
-        else:
-            result.insert(insert_at, supp)
-    return result
+# _title_prefix / _title_path / _common_prefix_len / _merge_supplements 已移到
+# app/utils/case_grouping.py：本模块顶部 import 了 ChromaStore，测试一 import 就连带
+# 拉起 chromadb（约 433 MB），使这段纯字符串逻辑没法在 CI 里轻量测。
 
 
 def _supplement_prompt(kept: list[dict], deleted: list[dict], gaps: list[str]) -> str:

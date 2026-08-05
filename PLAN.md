@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 实施计划
 
-> 版本 v2.1 | 更新 2026-08-05 | 排序对原有用例零改动（路径层也受 is_movable 约束）+ 生成时自动排序（补充用例归位）+ prompt 标题下钻到功能点 + 补充用例可标识 + 导出可选范围 + 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
+> 版本 v2.2 | 更新 2026-08-05 | CI（GitHub Actions）+ 回归测试 43 项 + 排序对原有用例零改动（路径层也受 is_movable 约束）+ 生成时自动排序（补充用例归位）+ prompt 标题下钻到功能点 + 补充用例可标识 + 导出可选范围 + 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
 
 ## 当前状态
 - **架构变更**: Project/Module → KnowledgeBase（知识库为核心，卡片式管理）
@@ -28,6 +28,7 @@
 | 死代码清理     | 删除无人调用的 POST /generate、/generate/stream、GenerateResponse 及相关非流式函数         | ✓    |
 | 用例编辑       | 审核阶段可微调 title/precondition/steps/expected_result，只改内容不碰 review 状态（保留原 reject_reason 信号），加 `edited` 标记 | ✓    |
 | 用例顺序       | 规则集中在 `app/utils/case_ordering.py`（生成流程与运维脚本共用）：顶层模块按需求切割顺序成块 → 块内按标题层级路径聚合到子功能级 → 同路径段内按正文共同前缀（≥3 字）单向前移聚合到功能点级。生成时自动排好，无需手工干预；**只挪补充用例、原有用例位置一律不动**——路径层（`place_by_path`）与功能点层（`forward_place`）都受 `is_movable` 约束，锁定用例只作被吸附的锚点；路径层的吸附力 `_affinity` 会压低待插用例的后代路径，避免总纲级补充被自己的细则隔开；`scripts/resort_batch.py` 补排历史批次时不传该约束，走全量排序 | ✓    |
+| 测试与 CI      | `backend/tests/` 43 项回归测试（排序 17 + 前缀解析/归位 26），只装 `pytest` 即可跑；为此把 `_merge_supplements` 等纯字符串函数从 `generator_service` 抽到 `app/utils/case_grouping.py`——后者顶部 import ChromaStore，测试一 import 就连带拉起约 433 MB 的 chromadb，CI 里既慢又脆。`.github/workflows/ci.yml` 在 push main 与向 main 提 PR 时跑后端 pytest（Py3.10）与前端 `npm ci && npm run build`（Node18，含 vue-tsc 类型检查） | ✓    |
 | 标题粒度约束   | 生成 prompt 硬要求前缀最后一级是功能点、不能停在页面/区块名（给正反例 + 判断标准），补充 prompt 要求复用已有功能点完整前缀；路径自带功能点后字面前缀启发式退化为兜底 | ✓    |
 | 补充用例标识   | 评审后定向补充的用例落库带 `origin='supplement'`，前端在生成结果/历史批次/审核页显示「补充」标签；加列前的历史用例为 NULL、不显示标签（阶段信息已丢失，不反推） | ✓    |
 | 导出范围       | 历史批次「下载 Excel」为 split-button，可选「全部用例 / 仅通过用例」（后者筛 `review.status === 'approved'`，与是否编辑过无关）；生成页用例未入库故不提供该选项 | ✓    |
@@ -67,6 +68,9 @@
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
+│   ├── requirements-dev.txt # 测试依赖（仅 pytest，不进生产镜像）
+│   ├── pytest.ini
+│   ├── tests/               # 回归测试：test_case_ordering(17) / test_case_grouping(26)
 │   ├── scripts/             # 运维脚本（手工执行）：delete_batch / backfill_case_priority / reindex_vectors / resort_batch
 │   └── app/
 │       ├── main.py
