@@ -12,6 +12,7 @@ from app.services.llm_service import LLMService
 from app.services.prompt_service import PromptService
 from app.services.retrieval_service import RetrievalService
 from app.services.validation_service import ValidationService
+from app.utils.case_ordering import order_cases
 from app.vectorstore.chroma_client import ChromaStore
 
 logger = logging.getLogger(__name__)
@@ -261,6 +262,16 @@ class GeneratorService:
                 if supplements:
                     all_cases = _merge_supplements(all_cases, supplements)
                     yield {"type": "progress", "stage": "supplementing", "message": f"补充 {len(supplements)} 条用例，共 {len(all_cases)} 条"}
+            # 收口排序：让补充用例挨到相关功能点旁边。放在这里有两个原因——
+            # ① 必须在 validate_cases 之前：告警按下标引用用例，排完再校验才不会错位；
+            # ② 必须在补充合并之后：补充用例正是要归位的对象。
+            # 只挪补充用例（is_movable），原有用例位置一律不动：LLM 一次产出的用例本就
+            # 按功能点聚好（实测 350 个子功能路径里仅 6 个被拆段），而功能点判定靠字面
+            # 共同前缀这一启发式，动原有用例收益小、误吸附风险大。
+            # 顶层模块顺序不受影响：all_cases 已按切割模块下标拼接，order_cases 只识别
+            # 块边界、不重排块序。
+            all_cases = order_cases(all_cases, lambda c: c.get("title") or "",
+                                    lambda c: c.get("origin") == "supplement")
             warnings = await ValidationService.validate_cases(db, all_cases)
 
         yield {"type": "complete", "cases": all_cases, "knowledge_used": kc, "knowledge_matches": km,
@@ -717,7 +728,11 @@ def _supplement_prompt(kept: list[dict], deleted: list[dict], gaps: list[str]) -
 
 {todo}
 
-只输出新增用例的 JSON 数组（不要 markdown 代码块），格式与原用例一致（title/priority/precondition/steps/expected_result/knowledge_refs）。若无需补充则输出 []。"""
+只输出新增用例的 JSON 数组（不要 markdown 代码块），格式与原用例一致（title/priority/precondition/steps/expected_result/knowledge_refs）。若无需补充则输出 []。
+
+title 的【】前缀要与上面已有用例保持同一套层级路径与粒度：补的场景若属于已有某个功能点，
+就复用那个功能点的完整前缀（照抄到最后一级），别只写到页面/区块那一级——前缀决定用例在
+最终列表里排到哪儿，粒度不一致就会脱离相关功能点。确实是全新功能点时，再按同样规则下钻。"""
 
 
 def _parse_json_object(raw: str) -> dict | None:
