@@ -306,6 +306,8 @@ async def stats_overview(db: AsyncSession = Depends(get_db)):
     from app.models.review_record import ReviewRecord
     total = (await db.execute(select(TestCase))).scalars().all()
     total_n = len(total)
+    # 批次数按 batch_id 去重，不能复用 total_n——那是用例条数，两者语义不同。
+    batch_n = len({c.batch_id for c in total if c.batch_id})
     approved = (await db.execute(select(ReviewRecord).where(ReviewRecord.status == "approved"))).scalars().all()
     rejected = (await db.execute(select(ReviewRecord).where(ReviewRecord.status == "rejected"))).scalars().all()
     reviewed = len(approved) + len(rejected)
@@ -314,4 +316,4 @@ async def stats_overview(db: AsyncSession = Depends(get_db)):
         # reject_reason 现在有一个特殊值 'edited'：代表 AI 一次没到位、人工微调后可用，
         # 归类到「不通过」但和幻觉/丢弃并列展示，便于识别「差一点点」的用例占比。
         if r.reject_reason: dist[r.reject_reason] = dist.get(r.reject_reason, 0) + 1
-    return {"total_cases": total_n, "reviewed_cases": reviewed, "approved_cases": len(approved), "rejected_cases": len(rejected), "usability_rate": round((len(approved) / reviewed * 100) if reviewed > 0 else 0), "hallucination_distribution": dist, "generation_count": total_n}
+    return {"total_cases": total_n, "reviewed_cases": reviewed, "approved_cases": len(approved), "rejected_cases": len(rejected), "usability_rate": round((len(approved) / reviewed * 100) if reviewed > 0 else 0), "hallucination_distribution": dist, "generation_count": batch_n}
