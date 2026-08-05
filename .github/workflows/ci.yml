@@ -16,9 +16,9 @@ jobs:
     name: 后端测试
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.10'   # README 要求 3.10+，取下限跑，高版本的语法特性才不会漏检
           cache: pip
@@ -39,9 +39,9 @@ jobs:
     name: 前端构建与类型检查
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '18'       # README 要求 Node 18+
           cache: npm
