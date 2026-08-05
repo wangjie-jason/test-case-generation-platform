@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同一分支的新 push 取消尚在跑的旧任务，避免连续提交时排队浪费额度
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'   # README 要求 3.10+，取下限跑，高版本的语法特性才不会漏检
+          cache: pip
+
+      # 只装 pytest，不装 requirements.txt。测试是纯字符串/列表逻辑，用不到
+      # chromadb（约 433 MB）与 sentence-transformers（带 torch）——正是为此把
+      # case_grouping 从 generator_service 抽了出来。装全量依赖会让 CI 从数秒变数分钟，
+      # 且实测大体积轮子拉取容易超时。
+      # 新增测试若真需要 fastapi/sqlalchemy 等，改这里装 -r backend/requirements.txt。
+      - name: 安装测试依赖
+        run: pip install -r backend/requirements-dev.txt
+
+      - name: pytest
+        working-directory: backend
+        run: pytest -v
+
+  frontend:
+    name: 前端构建与类型检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '18'       # README 要求 Node 18+
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # npm ci 而非 install：严格按 package-lock.json 装，CI 里不该出现锁文件漂移
+      - name: 安装依赖
+        working-directory: frontend
+        run: npm ci
+
+      # build 脚本是 `vue-tsc && vite build`，故这一步同时覆盖类型检查与构建
+      - name: 构建（含 vue-tsc 类型检查）
+        working-directory: frontend
+        run: npm run build
