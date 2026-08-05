@@ -1,0 +1,4 @@
+# 开发/测试依赖（运行时不需要，故与 requirements.txt 分开，也不进 Docker 镜像）
+# 安装：pip install -r requirements.txt -r requirements-dev.txt
+# 跑测试：cd backend && pytest
+pytest==9.1.*
