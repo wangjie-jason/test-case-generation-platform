@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 实施计划
 
-> 版本 v1.8 | 更新 2026-08-04 | 用例顺序功能点级聚合（resort_batch 单向前移）+ 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
+> 版本 v1.9 | 更新 2026-08-04 | 补充用例可标识（origin 字段）+ 导出可选范围 + 用例顺序功能点级聚合 + 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
 
 ## 当前状态
 - **架构变更**: Project/Module → KnowledgeBase（知识库为核心，卡片式管理）
@@ -28,6 +28,8 @@
 | 死代码清理     | 删除无人调用的 POST /generate、/generate/stream、GenerateResponse 及相关非流式函数         | ✓    |
 | 用例编辑       | 审核阶段可微调 title/precondition/steps/expected_result，只改内容不碰 review 状态（保留原 reject_reason 信号），加 `edited` 标记 | ✓    |
 | 用例顺序       | 顶层模块按需求切割顺序成块，块内按标题层级路径聚合到子功能级，同路径段内再按正文共同前缀（≥3 字）单向前移聚合到功能点级；已落库批次用 `scripts/resort_batch.py` 重排 `created_at` | ✓    |
+| 补充用例标识   | 评审后定向补充的用例落库带 `origin='supplement'`，前端在生成结果/历史批次/审核页显示「补充」标签；加列前的历史用例为 NULL、不显示标签（阶段信息已丢失，不反推） | ✓    |
+| 导出范围       | 历史批次「下载 Excel」为 split-button，可选「全部用例 / 仅通过用例」（后者筛 `review.status === 'approved'`，与是否编辑过无关）；生成页用例未入库故不提供该选项 | ✓    |
 
 ## Context
 

@@ -19,6 +19,10 @@ class TestCase(Base):
     # LLM 输出的用例等级 P0/P1/P2；老库补列时统一置空，前端读到 None 兜底显示为默认档
     priority: Mapped[str | None] = mapped_column(String(4), nullable=True)
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="ai")
+    # 产出阶段：'supplement' = 评审后针对被删/遗漏场景定向补充的用例；生成阶段的留空。
+    # 老库补列时统一为 NULL——那批用例落库时没记录阶段，事后无法可靠反推（source 一律
+    # 是 'ai'、created_at 只是写库时间），所以不猜，前端对 NULL 不显示任何标签。
+    origin: Mapped[str | None] = mapped_column(String(20), nullable=True)
     quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     knowledge_refs: Mapped[str | None] = mapped_column(Text, nullable=True)
     batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)

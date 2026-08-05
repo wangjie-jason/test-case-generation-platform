@@ -135,7 +135,7 @@ async def list_cases(batch_id: str | None = None, db: AsyncSession = Depends(get
     if case_ids:
         rr = await db.execute(select(ReviewRecord).where(ReviewRecord.case_id.in_(case_ids)))
         for rec in rr.scalars().all(): review_map[rec.case_id] = {"status": rec.status, "reject_reason": rec.reject_reason}
-    return [{"id": c.id, "title": c.title, "priority": c.priority, "precondition": c.precondition, "expected_result": c.expected_result, "steps": c.steps, "source": c.source, "batch_id": c.batch_id, "req_text": c.req_text, "created_at": str(c.created_at), "edited": bool(c.edited), "edited_at": str(c.edited_at) if c.edited_at else None, "review": review_map.get(c.id)} for c in cases]
+    return [{"id": c.id, "title": c.title, "priority": c.priority, "precondition": c.precondition, "expected_result": c.expected_result, "steps": c.steps, "source": c.source, "origin": c.origin, "batch_id": c.batch_id, "req_text": c.req_text, "created_at": str(c.created_at), "edited": bool(c.edited), "edited_at": str(c.edited_at) if c.edited_at else None, "review": review_map.get(c.id)} for c in cases]
 
 
 @router.patch("/cases/{case_id}")
