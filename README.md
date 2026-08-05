@@ -67,6 +67,17 @@ cd frontend && npm run dev
 
 打开 http://localhost:3000
 
+### 跑测试
+
+```bash
+# 首次需装测试依赖
+source venv/bin/activate && pip install -r backend/requirements-dev.txt
+
+cd backend && pytest
+```
+
+排序规则（`app/utils/case_ordering.py`）有回归测试守着——「只挪补充用例、原有用例位置一律不动」这个承诺曾连漏两次（PR #52 漏了路径层、#53 漏了同级/后代之分），改动排序逻辑后请务必跑一遍。
+
 ### Docker 部署
 
 ```bash
