@@ -6,11 +6,14 @@
 规则分三层，与生成阶段的语义保持一致：
 1. 按顶层模块切成连续块，块的先后**不变**——顶层顺序来自需求切割的 modules 列表，
    那是人给定的阅读顺序，不能按字母或标题重排。
-2. 块内按标题【】的层级路径做层级化稳定排序，每级次序取该级路径在块内的首次出现位置。
-   于是补充用例归到自己所属子功能那一段，同一子功能内保持原相对顺序。
+2. 块内按标题【】的层级路径归位，于是补充用例归到自己所属子功能那一段。传了
+   is_movable 就只插可动用例（place_by_path），否则整块层级排序（sort_block_by_path）。
 3. 同一路径段内再按**功能点**聚合：路径最后一级往往只到页面/区块（「提交页」
    「统计概览」），真正的功能点（「现场照片」「本周走访」）写在标题正文里，光靠路径
    排不到一起。故在正文上做单向前移，见 forward_place。
+
+is_movable 贯穿第 2、3 层：判 False 的用例位置一律不动，只作被吸附的锚点。第 2 层
+同样要拦——路径排序自己就会把交错的路径并段，那也是在动原有用例。
 
 函数都接受 `title_of` 取标题，因此既能排 ORM 对象（title 属性）也能排 dict（title 键）。
 """
@@ -106,9 +109,58 @@ def split_top_blocks(cases: list[T], title_of: Callable[[T], str]) -> list[list[
     return blocks
 
 
-def resort_block(block: list[T], title_of: Callable[[T], str],
-                 is_movable: Callable[[T], bool] | None = None) -> list[T]:
-    """块内层级化稳定排序（各级路径按其在块内首次出现位置），再按功能点单向前移聚合。"""
+def place_by_path(block: list[T], title_of: Callable[[T], str],
+                  is_movable: Callable[[T], bool]) -> list[T]:
+    """按路径归位，但只挪可动用例：锁定用例按原序构成骨架，一条都不重排。
+
+    这是 sort_block_by_path 的"只插不排"版本。层级排序哪怕整块只有锁定用例，也会把
+    交错的路径并段（【A-登录】【A-注册】【A-登录】→ 两条登录并到一起），那等于替用户
+    重排他原有的用例；而 is_movable 的承诺是"原有用例位置一律不动"。
+
+    先摆骨架再逐条插入（而非边遍历边插），实测骨架版与流式版在 300 组随机补充上输出
+    完全相同，两种写法等价。保留先摆骨架是因其更易读。
+    """
+    out = [c for c in block if not is_movable(c)]
+    for c in block:
+        if not is_movable(c):
+            continue
+        segs = title_segs(title_of(c))
+        scores = [(_affinity(title_segs(title_of(o)), segs), pos)
+                  for pos, o in enumerate(out)]
+        best = max((s for s, _ in scores), default=(0, 0))
+        if best[0] < 1:
+            out.append(c)  # 连顶层都对不上（或无【】前缀）：留在块尾
+        else:
+            # 插到最佳档位里最靠后那条之后，于是同路径的多条连成一段。
+            out.insert(max(pos for s, pos in scores if s == best) + 1, c)
+    return out
+
+
+def _affinity(cand: tuple[str, ...], supp: tuple[str, ...]) -> tuple[int, int]:
+    """骨架用例 cand 对待插用例 supp 的吸附力，越大越该插到它后面。
+
+    第一维是路径公共层数（同子功能胜过仅同模块）。第二维压低 supp 的**后代**：
+    光比公共层数分不出"路径完全相同"和"我是你的祖先"——总纲【提交页】与细则
+    【提交页-日常走访】对一条【提交页】补充的公共层数都是 2，同分取更靠后就把补充推到
+    了细则之后，总纲与总纲被细则隔开。后代降一档，补充才会紧跟在同级的总纲之后。
+    """
+    n = len_common_segs(cand, supp)
+    is_descendant = n == len(supp) and len(cand) > len(supp)
+    return (n, 0 if is_descendant else 1)
+
+
+def len_common_segs(a: tuple[str, ...], b: tuple[str, ...]) -> int:
+    """两条层级路径逐级比较，返回从顶层起连续相同的层数（越大越同属细分子功能）。"""
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def sort_block_by_path(block: list[T], title_of: Callable[[T], str]) -> list[T]:
+    """块内层级化稳定排序：各级路径按其在块内首次出现位置，同级内保持原相对顺序。"""
     rank: dict[tuple[str, ...], int] = {}
     for i, c in enumerate(block):
         segs = title_segs(title_of(c))
@@ -121,7 +173,19 @@ def resort_block(block: list[T], title_of: Callable[[T], str],
         # 逐级 rank + 原下标兜底：同一子功能内保持原相对顺序（稳定）
         return tuple(rank[segs[:depth]] for depth in range(1, len(segs) + 1)) + (i,)
 
-    ordered = [c for _, c in sorted(enumerate(block), key=sort_key)]
+    return [c for _, c in sorted(enumerate(block), key=sort_key)]
+
+
+def resort_block(block: list[T], title_of: Callable[[T], str],
+                 is_movable: Callable[[T], bool] | None = None) -> list[T]:
+    """块内两步：先按路径归位（第2层），再在同路径段内按功能点前移聚合（第3层）。
+
+    第2层按 is_movable 二选一——不传就整块层级排序（运维脚本补排历史批次），传了就只
+    插可动用例、锁定用例的相对顺序原样保留（生成流程）。两层都必须尊重 is_movable，
+    只在第3层拦是不够的：路径排序自己就会重排锁定用例。
+    """
+    ordered = (sort_block_by_path(block, title_of) if is_movable is None
+               else place_by_path(block, title_of, is_movable))
     # 路径排完后，同一路径的用例已连成一段，段内再按正文功能点做单向前移聚合。
     out: list[T] = []
     start = 0
@@ -134,10 +198,10 @@ def resort_block(block: list[T], title_of: Callable[[T], str],
 
 def order_cases(cases: list[T], title_of: Callable[[T], str],
                 is_movable: Callable[[T], bool] | None = None) -> list[T]:
-    """完整三层排序：顶层块序不变 → 块内路径层级 → 路径段内功能点前移。
+    """完整三层排序：顶层块序不变 → 块内路径归位 → 路径段内功能点前移。
 
-    is_movable 见 forward_place：生成流程传它来锁住原有用例、只让补充用例归位；
-    运维脚本补排历史批次时不传（整批一起整理）。
+    is_movable 见 place_by_path / forward_place：生成流程传它来锁住原有用例、只让补充
+    用例归位（第2、3层都受约束）；运维脚本补排历史批次时不传（整批一起整理）。
     """
     return [c for block in split_top_blocks(cases, title_of)
             for c in resort_block(block, title_of, is_movable)]
