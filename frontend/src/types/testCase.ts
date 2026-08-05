@@ -14,6 +14,9 @@ export interface GeneratedTestCase {
   steps?: string | unknown[] | null
   expected_result?: string | null
   source?: 'manual' | 'ai'
+  // 产出阶段：'supplement' = 评审后针对被删/遗漏场景定向补充的用例。生成阶段的用例与
+  // 加列前的历史用例都是空值——历史数据无法可靠反推，故不显示标签而非标成「生成」。
+  origin?: 'supplement' | null
   quality_score?: number | null
   knowledge_refs?: KnowledgeRef[]
   priority?: 'P0' | 'P1' | 'P2' | 'P3' | string

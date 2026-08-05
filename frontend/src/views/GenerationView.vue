@@ -439,6 +439,7 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
                 <template #title>
                   <span style="font-weight:bold;color:#409EFF">#{{ idx + 1 }}</span>
                   <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" style="margin:0 8px">{{ c.priority }}</el-tag>
+                  <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain" style="margin-right:8px">补充</el-tag>
                   <span>{{ c.title }}</span>
                 </template>
                 <div v-if="c.precondition" style="margin-bottom:6px;font-size:13px">前置：{{ c.precondition }}</div>
@@ -480,6 +481,7 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
               <div v-else-if="!b.items.length" style="text-align:center;color:#909399;padding:10px">暂无数据</div>
               <div v-else v-for="c in b.items" :key="c.id" style="padding:6px;border-bottom:1px solid #f0f0f0;font-size:13px">
                 <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:6px">{{ c.priority }}</el-tag>
+                <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain" style="margin-right:6px">补充</el-tag>
                 <strong>{{ c.title }}</strong>
                 <div v-if="c.precondition" style="color:#909399">前置：{{ c.precondition }}</div>
                 <div v-if="c.steps" style="color:#909399;white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>

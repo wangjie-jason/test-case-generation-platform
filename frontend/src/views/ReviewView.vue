@@ -298,6 +298,7 @@ async function saveInsert() {
                   <span class="ri-title">{{ c.title }}</span>
                   <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:4px">{{ c.priority }}</el-tag>
                   <el-tag v-if="c.edited" size="small" type="warning" effect="plain" style="margin-right:4px">已编辑</el-tag>
+                  <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain" style="margin-right:4px">补充</el-tag>
                   <el-tag v-if="c.source === 'manual'" size="small" type="info" effect="plain" style="margin-right:4px">手动</el-tag>
                   <el-tag v-if="c.review?.status === 'approved'" type="success" size="small">✓</el-tag>
                   <el-tag v-else-if="c.review?.status === 'rejected'" type="danger" size="small">✗ {{ rejectReasons.find(r => r.value === c.review?.reject_reason)?.label || '' }}</el-tag>

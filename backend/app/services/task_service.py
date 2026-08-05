@@ -38,6 +38,8 @@ async def persist_cases(db, cases: list[dict], batch_name: str | None, requireme
             priority=(c.get("priority") or None),
             source="ai", batch_id=batch_id, req_text=batch_name or requirement_text[:80],
             knowledge_refs=json.dumps(c.get("knowledge_refs", []), ensure_ascii=False),
+            # 评审后定向补充的用例带 origin='supplement'；生成阶段的不带该键，留 NULL。
+            origin=c.get("origin"),
         )
         db.add(tc)
         created.append(tc)

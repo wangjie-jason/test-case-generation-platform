@@ -36,6 +36,7 @@ async def init_db():
         await conn.run_sync(_migrate_prd_document_source_columns)
         await conn.run_sync(_migrate_test_case_edit_columns)
         await conn.run_sync(_migrate_test_case_priority_column)
+        await conn.run_sync(_migrate_test_case_origin_column)
 
 
 def _migrate_prd_document_source_columns(sync_conn) -> None:
@@ -72,3 +73,14 @@ def _migrate_test_case_priority_column(sync_conn) -> None:
     cols = {row[1] for row in sync_conn.execute(text("PRAGMA table_info(test_cases)"))}
     if "priority" not in cols:
         sync_conn.execute(text("ALTER TABLE test_cases ADD COLUMN priority VARCHAR(4)"))
+
+
+def _migrate_test_case_origin_column(sync_conn) -> None:
+    """标记用例的产出阶段（'supplement' = 评审后定向补充），让前端能区分补充用例。
+    老库补一列 origin（可空）：那批用例落库时未记录阶段，事后无法可靠反推，统一留 NULL，
+    前端对 NULL 不显示标签，不把猜测当事实。"""
+    from sqlalchemy import text
+
+    cols = {row[1] for row in sync_conn.execute(text("PRAGMA table_info(test_cases)"))}
+    if "origin" not in cols:
+        sync_conn.execute(text("ALTER TABLE test_cases ADD COLUMN origin VARCHAR(20)"))

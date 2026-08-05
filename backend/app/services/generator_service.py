@@ -254,7 +254,10 @@ class GeneratorService:
                     k = _title_key(c.get("title", ""))
                     if k and k not in existing:
                         existing.add(k)
-                        supplements.append(c)
+                        # 打上产出阶段标记，落库进 test_cases.origin，前端据此显示「补充」标签。
+                        # 必须在这里打：合并后补充用例会散到各自模块里，事后再也分不出来
+                        # （生成/补充用例的 source 都是 'ai'，created_at 只是写库时间）。
+                        supplements.append({**c, "origin": "supplement"})
                 if supplements:
                     all_cases = _merge_supplements(all_cases, supplements)
                     yield {"type": "progress", "stage": "supplementing", "message": f"补充 {len(supplements)} 条用例，共 {len(all_cases)} 条"}
