@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { ArrowRight } from '@element-plus/icons-vue'
 import { generationApi, type CaseRecord, type BatchSummary } from '@/api/generation'
 
 const batches = ref<BatchSummary[]>([])
 const batchItems = ref<Record<string, CaseRecord[]>>({})
 const loadingBatch = ref<Record<string, boolean>>({})
+const expandedBatch = ref<Record<string, boolean>>({})
 const loading = ref(false)
 const filterTab = ref<'all' | 'pending' | 'approved' | 'rejected'>('all')
 
@@ -63,6 +65,12 @@ async function loadBatchItems(bid: string) {
 }
 
 onMounted(fetchBatches)
+
+// 次级折叠面板：点一次展开并懒加载（已加载过就只切显隐），再点收起。
+function toggleBatch(bid: string) {
+  expandedBatch.value[bid] = !expandedBatch.value[bid]
+  if (expandedBatch.value[bid]) loadBatchItems(bid)
+}
 
 // 本地增量更新：审核后刷新单条 items，同时同步 batch 汇总里的 reviewed/approved 计数。
 function bumpBatchStats(bid: string, prev: CaseRecord['review'], next: CaseRecord['review']) {
@@ -262,14 +270,27 @@ async function saveInsert() {
       <el-empty description="暂无用例，请先生成" />
     </div>
 
-    <div v-for="batch in displayBatches" :key="batch.batch_id" class="batch-card">
-      <div class="batch-header">
-        <div>
-          <strong class="batch-name">{{ batch.req_text?.slice(0, 60) || '未命名需求' }}</strong>
+    <div v-for="batch in displayBatches" :key="batch.batch_id" class="batch-card" :class="{ 'is-open': expandedBatch[batch.batch_id] }">
+      <!-- 标题行本身就是折叠头：箭头指示展开态，不再另起一行「展开 N 条用例」 -->
+      <div class="batch-header" @click="toggleBatch(batch.batch_id)">
+        <el-icon class="batch-arrow"><ArrowRight /></el-icon>
+        <div class="batch-title-block">
+          <!-- 需求文本截断到 60 字，被切掉的部分靠 tooltip 补全（只在真截断时挂） -->
+          <el-tooltip :disabled="(batch.req_text?.length || 0) <= 60" :content="batch.req_text" placement="top-start" :show-after="300" popper-class="batch-req-tip">
+            <strong class="batch-name">{{ batch.req_text?.slice(0, 60) || '未命名需求' }}{{ (batch.req_text?.length || 0) > 60 ? '…' : '' }}</strong>
+          </el-tooltip>
           <span class="batch-meta-info">{{ batch.total }} 条 · {{ batch.created_at?.slice(0, 16) }}</span>
         </div>
-        <div class="batch-actions">
-          <span class="batch-progress">已审核 {{ batch.reviewed }}/{{ batch.total }}</span>
+        <!-- 操作区在折叠头内部，点按钮不应连带折叠 -->
+        <div class="batch-actions" @click.stop>
+          <!-- 审核进度：细条 + 数字，扫一眼就知道哪批还没审完 -->
+          <div class="batch-progress">
+            <span class="bp-text">已审核 {{ batch.reviewed }}/{{ batch.total }}</span>
+            <span class="bp-track">
+              <span class="bp-fill" :class="{ done: batch.total > 0 && batch.reviewed >= batch.total }"
+                    :style="{ width: (batch.total > 0 ? Math.round(batch.reviewed / batch.total * 100) : 0) + '%' }"></span>
+            </span>
+          </div>
           <el-button size="small" type="success" :disabled="!batch.loaded" @click="approveAllInBatch(batch.batch_id, batch.items)">全部通过</el-button>
           <el-popover placement="bottom" :width="220" trigger="click" :disabled="!batch.loaded">
             <template #reference>
@@ -281,54 +302,54 @@ async function saveInsert() {
         </div>
       </div>
 
-      <el-collapse @change="(val: string | string[]) => (Array.isArray(val) ? val : [val]).includes(batch.batch_id) && loadBatchItems(batch.batch_id)">
-        <el-collapse-item :title="`展开 ${batch.total} 条用例`" :name="batch.batch_id">
-          <div v-if="batch.loading" style="text-align:center;color:#909399;padding:10px">加载中...</div>
-          <div v-else-if="!batch.items.length" style="text-align:center;color:#909399;padding:10px">
-            {{ batch.loaded ? '当前筛选下无匹配用例' : '暂无数据' }}
+      <el-collapse-transition>
+      <div class="batch-body" v-show="expandedBatch[batch.batch_id]">
+        <div v-if="batch.loading" style="text-align:center;color:#909399;padding:10px">加载中...</div>
+        <div v-else-if="!batch.items.length" style="text-align:center;color:#909399;padding:10px">
+          {{ batch.loaded ? '当前筛选下无匹配用例' : '暂无数据' }}
+        </div>
+        <template v-else>
+          <!-- 首个用例前的插入位 -->
+          <div class="insert-slot" v-if="filterTab === 'all'" @click="openInsertDialog(batch.batch_id, 0)">
+            <span class="insert-line"></span><span class="insert-btn">+ 在此处插入用例</span><span class="insert-line"></span>
           </div>
-          <template v-else>
-            <!-- 首个用例前的插入位 -->
-            <div class="insert-slot" v-if="filterTab === 'all'" @click="openInsertDialog(batch.batch_id, 0)">
+          <template v-for="(c, idx) in batch.items" :key="c.id">
+            <div class="review-item" :class="{ approved: c.review?.status === 'approved', rejected: c.review?.status === 'rejected' }">
+              <div class="ri-header">
+                <span class="ri-title">{{ c.title }}</span>
+                <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:4px">{{ c.priority }}</el-tag>
+                <el-tag v-if="c.edited" size="small" type="warning" effect="plain" style="margin-right:4px">已编辑</el-tag>
+                <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain" style="margin-right:4px">补充</el-tag>
+                <el-tag v-if="c.source === 'manual'" size="small" type="info" effect="plain" style="margin-right:4px">手动</el-tag>
+                <el-tag v-if="c.review?.status === 'approved'" type="success" size="small">✓</el-tag>
+                <el-tag v-else-if="c.review?.status === 'rejected'" type="danger" size="small">✗ {{ rejectReasons.find(r => r.value === c.review?.reject_reason)?.label || '' }}</el-tag>
+                <template v-else>
+                  <el-button size="small" type="success" @click="approveCase(c.id, batch.batch_id)" style="margin-left:8px">通过</el-button>
+                  <el-button size="small" @click="openEditDialog(c, batch.batch_id)" style="margin-left:4px">编辑</el-button>
+                  <el-popover placement="bottom" :width="200" trigger="click">
+                    <template #reference>
+                      <el-button size="small" type="danger">不可用</el-button>
+                    </template>
+                    <el-button v-for="r in rejectReasons" :key="r.value" size="small" style="margin:2px" @click="rejectCase(c.id, batch.batch_id, r.value)">{{ r.label }}</el-button>
+                  </el-popover>
+                </template>
+                <!-- 已通过或已拒绝的用例也允许编辑；编辑不改 review 状态，只改内容 -->
+                <el-button v-if="c.review" size="small" text @click="openEditDialog(c, batch.batch_id)" style="margin-left:4px">编辑</el-button>
+              </div>
+              <div class="ri-body">
+                <div v-if="c.precondition" class="ri-line">前置：{{ c.precondition }}</div>
+                <div v-if="c.steps" class="ri-line" style="white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
+                <div v-if="c.expected_result" class="ri-line">预期：{{ c.expected_result }}</div>
+              </div>
+            </div>
+            <!-- 每条 case 之后的插入位；筛选 tab 下隐藏（否则插入位置会错位） -->
+            <div class="insert-slot" v-if="filterTab === 'all'" @click="openInsertDialog(batch.batch_id, idx + 1)">
               <span class="insert-line"></span><span class="insert-btn">+ 在此处插入用例</span><span class="insert-line"></span>
             </div>
-            <template v-for="(c, idx) in batch.items" :key="c.id">
-              <div class="review-item" :class="{ approved: c.review?.status === 'approved', rejected: c.review?.status === 'rejected' }">
-                <div class="ri-header">
-                  <span class="ri-title">{{ c.title }}</span>
-                  <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:4px">{{ c.priority }}</el-tag>
-                  <el-tag v-if="c.edited" size="small" type="warning" effect="plain" style="margin-right:4px">已编辑</el-tag>
-                  <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain" style="margin-right:4px">补充</el-tag>
-                  <el-tag v-if="c.source === 'manual'" size="small" type="info" effect="plain" style="margin-right:4px">手动</el-tag>
-                  <el-tag v-if="c.review?.status === 'approved'" type="success" size="small">✓</el-tag>
-                  <el-tag v-else-if="c.review?.status === 'rejected'" type="danger" size="small">✗ {{ rejectReasons.find(r => r.value === c.review?.reject_reason)?.label || '' }}</el-tag>
-                  <template v-else>
-                    <el-button size="small" type="success" @click="approveCase(c.id, batch.batch_id)" style="margin-left:8px">通过</el-button>
-                    <el-button size="small" @click="openEditDialog(c, batch.batch_id)" style="margin-left:4px">编辑</el-button>
-                    <el-popover placement="bottom" :width="200" trigger="click">
-                      <template #reference>
-                        <el-button size="small" type="danger">不可用</el-button>
-                      </template>
-                      <el-button v-for="r in rejectReasons" :key="r.value" size="small" style="margin:2px" @click="rejectCase(c.id, batch.batch_id, r.value)">{{ r.label }}</el-button>
-                    </el-popover>
-                  </template>
-                  <!-- 已通过或已拒绝的用例也允许编辑；编辑不改 review 状态，只改内容 -->
-                  <el-button v-if="c.review" size="small" text @click="openEditDialog(c, batch.batch_id)" style="margin-left:4px">编辑</el-button>
-                </div>
-                <div class="ri-body">
-                  <div v-if="c.precondition" class="ri-line">前置：{{ c.precondition }}</div>
-                  <div v-if="c.steps" class="ri-line" style="white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
-                  <div v-if="c.expected_result" class="ri-line">预期：{{ c.expected_result }}</div>
-                </div>
-              </div>
-              <!-- 每条 case 之后的插入位；筛选 tab 下隐藏（否则插入位置会错位） -->
-              <div class="insert-slot" v-if="filterTab === 'all'" @click="openInsertDialog(batch.batch_id, idx + 1)">
-                <span class="insert-line"></span><span class="insert-btn">+ 在此处插入用例</span><span class="insert-line"></span>
-              </div>
-            </template>
           </template>
-        </el-collapse-item>
-      </el-collapse>
+        </template>
+      </div>
+      </el-collapse-transition>
     </div>
   </div>
 
@@ -394,14 +415,31 @@ async function saveInsert() {
 <style scoped>
 .review-view { max-width: 1024px; margin: 0 auto; }
 .stats-bar { display: flex; gap: 40px; margin: 20px 0; padding: 16px; background: #fff; border-radius: 8px; }
-.batch-card { border: 1px solid #e4e7ed; border-radius: 8px; padding: 14px; margin-bottom: 16px; background: #fff; }
-.batch-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; gap: 12px; }
+/* 批次卡片：padding 归零，交给 header / body 各自控制，展开时 header 才出下边框 */
+.batch-card { border: 1px solid #e4e7ed; border-radius: 8px; margin-bottom: 16px; background: #fff; overflow: hidden; }
+/* 标题行 = 折叠头：整行可点，hover 浅蓝底，箭头指示展开态 */
+.batch-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; cursor: pointer; user-select: none;
+  transition: background 0.2s ease;
+}
+.batch-header:hover { background: #f5f9ff; }
+.batch-card.is-open .batch-header { border-bottom: 1px solid #ebeef5; }
+.batch-arrow { font-size: 13px; color: #a8abb2; flex-shrink: 0; transition: transform 0.2s ease, color 0.2s ease; }
+.batch-header:hover .batch-arrow { color: #409EFF; }
+.batch-card.is-open .batch-arrow { transform: rotate(90deg); color: #409EFF; }
+.batch-title-block { flex: 1; min-width: 0; }
 .batch-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; white-space: nowrap; }
-.batch-name { font-size: 14px; display: block; }
-.batch-meta-info { display: block; font-size: 12px; color: #909399; margin-top: 2px; }
-.batch-req { display: block; font-size: 12px; color: #909399; margin-top: 4px; }
-.batch-time { display: block; font-size: 11px; color: #c0c4cc; }
-.batch-progress { font-size: 12px; color: #909399; }
+.batch-name { font-size: 14px; font-weight: 600; line-height: 1.4; color: #303133; display: block; }
+.batch-meta-info { display: block; font-size: 12px; color: #a8abb2; margin-top: 3px; }
+/* 审核进度：数字下面压一条 3px 细条，比纯数字更快扫出哪批没审完 */
+.batch-progress { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; margin-right: 4px; }
+.bp-text { font-size: 12px; color: #909399; line-height: 1; }
+.bp-track { display: block; width: 72px; height: 3px; border-radius: 2px; background: #ebeef5; overflow: hidden; }
+.bp-fill { display: block; height: 100%; border-radius: 2px; background: #409EFF; transition: width 0.3s ease; }
+.bp-fill.done { background: #67C23A; }
+/* 展开后的用例列表：与原版一致，不加槽底/缩进/容器边框 */
+.batch-body { padding: 0 14px 14px; }
 .review-item { padding: 8px 12px; border-bottom: 1px solid #f0f0f0; }
 .review-item:last-child { border-bottom: none; }
 .review-item.approved { background: #f0f9eb; }
@@ -415,4 +453,9 @@ async function saveInsert() {
 .insert-slot:hover { opacity: 1; height: 24px; }
 .insert-line { flex: 1; height: 1px; background: #409EFF; }
 .insert-btn { font-size: 12px; color: #409EFF; white-space: nowrap; }
+</style>
+
+<!-- tooltip 弹层 teleport 到 body，scoped 选择器管不到，故单开一个非 scoped 块 -->
+<style>
+.batch-req-tip { max-width: 420px; line-height: 1.6; }
 </style>
