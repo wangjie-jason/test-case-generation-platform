@@ -506,13 +506,16 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
           <div class="batch-body" v-show="expandedBatch[b.batch_id]">
             <div v-if="b.loading" style="text-align:center;color:#909399;padding:10px">加载中...</div>
             <div v-else-if="!b.items.length" style="text-align:center;color:#909399;padding:10px">暂无数据</div>
-            <div v-else v-for="c in b.items" :key="c.id" class="hist-item">
-              <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:6px">{{ c.priority }}</el-tag>
-              <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain" style="margin-right:6px">补充</el-tag>
-              <strong>{{ c.title }}</strong>
-              <div v-if="c.precondition" style="color:#909399">前置：{{ c.precondition }}</div>
-              <div v-if="c.steps" style="color:#909399;white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
-              <div v-if="c.expected_result" style="color:#909399">预期：{{ c.expected_result }}</div>
+            <!-- 用例列表在批次内部独立滚动（max-height 60vh），批次多时不必整页下滑 -->
+            <div v-else class="case-scroll">
+              <div v-for="c in b.items" :key="c.id" class="hist-item">
+                <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:6px">{{ c.priority }}</el-tag>
+                <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain" style="margin-right:6px">补充</el-tag>
+                <strong>{{ c.title }}</strong>
+                <div v-if="c.precondition" style="color:#909399">前置：{{ c.precondition }}</div>
+                <div v-if="c.steps" style="color:#909399;white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
+                <div v-if="c.expected_result" style="color:#909399">预期：{{ c.expected_result }}</div>
+              </div>
             </div>
           </div>
           </el-collapse-transition>
@@ -563,25 +566,33 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
 .match-item { padding: 8px 10px; margin-bottom: 8px; border: 1px solid #ebeef5; border-radius: 8px; background: #fafafa; }
 .match-title { font-size: 13px; font-weight: 600; color: #409EFF; }
 .match-desc { margin-top: 4px; font-size: 12px; line-height: 1.5; color: #606266; white-space: pre-wrap; word-break: break-word; }
-/* 历史批次卡片：标题行即折叠头（整行可点 + 箭头指示），用例列表缩进并压浅底做下级内容 */
-.batch-card { border: 1px solid #e4e7ed; border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+/* 历史批次卡片：标题行即折叠头（整行可点 + 箭头指示）。
+   --gutter 卡片左内边距，--indent 是「箭头 + 间距」宽度，
+   用例标题与批次标题都从 gutter+indent 起，共享同一条左边界。 */
+.batch-card {
+  --gutter: 14px; --indent: 23px;
+  border: 1px solid #e4e7ed; border-radius: 8px; margin-bottom: 12px; overflow: hidden;
+}
 .batch-header {
   display: flex; align-items: center; gap: 10px;
-  padding: 12px 14px; cursor: pointer; user-select: none;
+  padding: 12px var(--gutter); cursor: pointer; user-select: none;
   transition: background 0.2s ease;
 }
 .batch-header:hover { background: #f5f9ff; }
 .batch-card.is-open .batch-header { border-bottom: 1px solid #ebeef5; }
-.batch-arrow { font-size: 13px; color: #a8abb2; flex-shrink: 0; transition: transform 0.2s ease, color 0.2s ease; }
+/* 13px 图标 + 10px gap = 23px，与 --indent 一致 */
+.batch-arrow { font-size: 13px; width: 13px; color: #a8abb2; flex-shrink: 0; transition: transform 0.2s ease, color 0.2s ease; }
 .batch-header:hover .batch-arrow { color: #409EFF; }
 .batch-card.is-open .batch-arrow { transform: rotate(90deg); color: #409EFF; }
 .batch-title-block { flex: 1; min-width: 0; }
 .batch-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .batch-name { font-size: 14px; font-weight: 600; line-height: 1.4; color: #303133; display: block; }
 .batch-meta-info { display: block; font-size: 12px; color: #a8abb2; margin-top: 3px; }
-/* 展开后的用例列表：与原版一致，不加槽底/缩进/容器边框 */
-.batch-body { padding: 0 14px 14px; }
-.hist-item { padding: 6px; border-bottom: 1px solid #f0f0f0; font-size: 13px; }
+/* 展开后的用例列表：左内边距对齐到批次标题的左边界。
+   滚动放内层：collapse-transition 动画 height，与 max-height 会互相钳制 */
+.batch-body { padding: 0 var(--gutter) 6px; }
+.case-scroll { max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; }
+.hist-item { padding: 10px 0 10px var(--indent); border-bottom: 1px solid #f0f0f0; font-size: 13px; }
 .hist-item:last-child { border-bottom: none; }
 .history-tab { max-width: 960px; margin: 0 auto; }
 .task-list { margin-top: 14px; border-top: 1px solid #ebeef5; padding-top: 10px; }

@@ -72,6 +72,14 @@ function toggleBatch(bid: string) {
   if (expandedBatch.value[bid]) loadBatchItems(bid)
 }
 
+// 全角开括号（【（「等）的墨迹在字框内偏右，盒子左边界虽与「前置：」对齐，
+// 视觉上却像缩进了几像素。对这类开头的标题补一点负偏移抵掉。
+// 本想用 hanging-punctuation，但只有 Safari 支持。
+const LEADING_BRACKETS = /^[【（〔［｛「『《〈]/
+function hangsPunctuation(title?: string) {
+  return LEADING_BRACKETS.test(title || '')
+}
+
 // 本地增量更新：审核后刷新单条 items，同时同步 batch 汇总里的 reviewed/approved 计数。
 function bumpBatchStats(bid: string, prev: CaseRecord['review'], next: CaseRecord['review']) {
   const b = batches.value.find(x => x.batch_id === bid)
@@ -254,8 +262,11 @@ async function saveInsert() {
       <el-statistic title="总用例" :value="totalCases" />
       <el-statistic title="已审核" :value="totalReviewed" />
       <el-statistic title="通过" :value="totalApproved" />
-      <el-statistic title="可用率">
-        <template #default><span :style="{color: usabilityRate >= 85 ? '#67C23A' : '#E6A23C'}">{{ usabilityRate }}%</span></template>
+      <!-- el-statistic 只有 title/prefix/suffix 三个 slot，没有 default——
+           原来写 #default 会被整个丢弃，又没传 value，于是恒显示 0 -->
+      <el-statistic title="可用率" :value="usabilityRate"
+                    :value-style="{ color: usabilityRate >= 85 ? '#67C23A' : '#E6A23C' }">
+        <template #suffix><span :style="{color: usabilityRate >= 85 ? '#67C23A' : '#E6A23C'}">%</span></template>
       </el-statistic>
     </div>
 
@@ -308,7 +319,8 @@ async function saveInsert() {
         <div v-else-if="!batch.items.length" style="text-align:center;color:#909399;padding:10px">
           {{ batch.loaded ? '当前筛选下无匹配用例' : '暂无数据' }}
         </div>
-        <template v-else>
+        <!-- 用例列表在批次内部独立滚动（max-height 60vh），批次多时不必整页下滑 -->
+        <div v-else class="case-scroll">
           <!-- 首个用例前的插入位 -->
           <div class="insert-slot" v-if="filterTab === 'all'" @click="openInsertDialog(batch.batch_id, 0)">
             <span class="insert-line"></span><span class="insert-btn">+ 在此处插入用例</span><span class="insert-line"></span>
@@ -316,16 +328,18 @@ async function saveInsert() {
           <template v-for="(c, idx) in batch.items" :key="c.id">
             <div class="review-item" :class="{ approved: c.review?.status === 'approved', rejected: c.review?.status === 'rejected' }">
               <div class="ri-header">
-                <span class="ri-title">{{ c.title }}</span>
-                <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:4px">{{ c.priority }}</el-tag>
-                <el-tag v-if="c.edited" size="small" type="warning" effect="plain" style="margin-right:4px">已编辑</el-tag>
-                <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain" style="margin-right:4px">补充</el-tag>
-                <el-tag v-if="c.source === 'manual'" size="small" type="info" effect="plain" style="margin-right:4px">手动</el-tag>
+                <span class="ri-title" :class="{ hang: hangsPunctuation(c.title) }">{{ c.title }}</span>
+                <!-- 间距一律交给 .ri-header 的 gap，标签/按钮上不再挂内联 margin，
+                     否则两套间距叠加，每个缝隙宽度都不一样 -->
+                <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain">{{ c.priority }}</el-tag>
+                <el-tag v-if="c.edited" size="small" type="warning" effect="plain">已编辑</el-tag>
+                <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain">补充</el-tag>
+                <el-tag v-if="c.source === 'manual'" size="small" type="info" effect="plain">手动</el-tag>
                 <el-tag v-if="c.review?.status === 'approved'" type="success" size="small">✓</el-tag>
                 <el-tag v-else-if="c.review?.status === 'rejected'" type="danger" size="small">✗ {{ rejectReasons.find(r => r.value === c.review?.reject_reason)?.label || '' }}</el-tag>
                 <template v-else>
-                  <el-button size="small" type="success" @click="approveCase(c.id, batch.batch_id)" style="margin-left:8px">通过</el-button>
-                  <el-button size="small" @click="openEditDialog(c, batch.batch_id)" style="margin-left:4px">编辑</el-button>
+                  <el-button size="small" type="success" @click="approveCase(c.id, batch.batch_id)">通过</el-button>
+                  <el-button size="small" @click="openEditDialog(c, batch.batch_id)">编辑</el-button>
                   <el-popover placement="bottom" :width="200" trigger="click">
                     <template #reference>
                       <el-button size="small" type="danger">不可用</el-button>
@@ -334,7 +348,7 @@ async function saveInsert() {
                   </el-popover>
                 </template>
                 <!-- 已通过或已拒绝的用例也允许编辑；编辑不改 review 状态，只改内容 -->
-                <el-button v-if="c.review" size="small" text @click="openEditDialog(c, batch.batch_id)" style="margin-left:4px">编辑</el-button>
+                <el-button v-if="c.review" size="small" text @click="openEditDialog(c, batch.batch_id)">编辑</el-button>
               </div>
               <div class="ri-body">
                 <div v-if="c.precondition" class="ri-line">前置：{{ c.precondition }}</div>
@@ -347,7 +361,7 @@ async function saveInsert() {
               <span class="insert-line"></span><span class="insert-btn">+ 在此处插入用例</span><span class="insert-line"></span>
             </div>
           </template>
-        </template>
+        </div>
       </div>
       </el-collapse-transition>
     </div>
@@ -415,21 +429,29 @@ async function saveInsert() {
 <style scoped>
 .review-view { max-width: 1024px; margin: 0 auto; }
 .stats-bar { display: flex; gap: 40px; margin: 20px 0; padding: 16px; background: #fff; border-radius: 8px; }
-/* 批次卡片：padding 归零，交给 header / body 各自控制，展开时 header 才出下边框 */
-.batch-card { border: 1px solid #e4e7ed; border-radius: 8px; margin-bottom: 16px; background: #fff; overflow: hidden; }
+/* 批次卡片：padding 归零，交给 header / body 各自控制，展开时 header 才出下边框。
+   --gutter 是卡片左内边距，--indent 是「箭头 + 间距」的宽度，
+   批次标题与用例标题都从 gutter+indent 起，两者共享同一条左边界。 */
+.batch-card {
+  --gutter: 14px; --indent: 23px;
+  border: 1px solid #e4e7ed; border-radius: 8px; margin-bottom: 16px; background: #fff; overflow: hidden;
+}
 /* 标题行 = 折叠头：整行可点，hover 浅蓝底，箭头指示展开态 */
 .batch-header {
   display: flex; align-items: center; gap: 10px;
-  padding: 12px 14px; cursor: pointer; user-select: none;
+  padding: 12px var(--gutter); cursor: pointer; user-select: none;
   transition: background 0.2s ease;
 }
 .batch-header:hover { background: #f5f9ff; }
 .batch-card.is-open .batch-header { border-bottom: 1px solid #ebeef5; }
-.batch-arrow { font-size: 13px; color: #a8abb2; flex-shrink: 0; transition: transform 0.2s ease, color 0.2s ease; }
+/* 13px 图标 + 10px gap = 23px，与 --indent 一致 */
+.batch-arrow { font-size: 13px; width: 13px; color: #a8abb2; flex-shrink: 0; transition: transform 0.2s ease, color 0.2s ease; }
 .batch-header:hover .batch-arrow { color: #409EFF; }
 .batch-card.is-open .batch-arrow { transform: rotate(90deg); color: #409EFF; }
 .batch-title-block { flex: 1; min-width: 0; }
 .batch-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; white-space: nowrap; }
+/* 同上：清掉 Element Plus 的相邻按钮 margin，缝隙只由 gap 决定 */
+.batch-actions :deep(.el-button + .el-button) { margin-left: 0; }
 .batch-name { font-size: 14px; font-weight: 600; line-height: 1.4; color: #303133; display: block; }
 .batch-meta-info { display: block; font-size: 12px; color: #a8abb2; margin-top: 3px; }
 /* 审核进度：数字下面压一条 3px 细条，比纯数字更快扫出哪批没审完 */
@@ -438,15 +460,25 @@ async function saveInsert() {
 .bp-track { display: block; width: 72px; height: 3px; border-radius: 2px; background: #ebeef5; overflow: hidden; }
 .bp-fill { display: block; height: 100%; border-radius: 2px; background: #409EFF; transition: width 0.3s ease; }
 .bp-fill.done { background: #67C23A; }
-/* 展开后的用例列表：与原版一致，不加槽底/缩进/容器边框 */
-.batch-body { padding: 0 14px 14px; }
-.review-item { padding: 8px 12px; border-bottom: 1px solid #f0f0f0; }
+/* 展开后的用例列表：左内边距对齐到批次标题的左边界，使「用例标题」与上方
+   「批次标题」共用一条左缘。
+   滚动放在内层 .case-scroll 而不是 .batch-body：collapse-transition 靠动画
+   height 实现，跟 max-height 会互相钳制，展开动画会跳。 */
+.batch-body { padding: 0 var(--gutter) 6px; }
+.case-scroll { max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; }
+.review-item { padding: 10px 0 10px var(--indent); border-bottom: 1px solid #f0f0f0; }
 .review-item:last-child { border-bottom: none; }
+/* 状态底色留出左右内边距、不通到卡片边缘，读起来是这一行的高亮而非整块色带 */
+.review-item.approved, .review-item.rejected { border-radius: 4px; padding-right: 8px; }
 .review-item.approved { background: #f0f9eb; }
 .review-item.rejected { background: #fef0f0; }
 .ri-header { display: flex; align-items: center; gap: 8px; }
+/* Element Plus 给相邻按钮加了 margin-left:12px，会与上面的 gap 叠加成不等宽缝隙 */
+.ri-header :deep(.el-button + .el-button) { margin-left: 0; }
 .ri-title { font-size: 13px; font-weight: 600; flex: 1; }
-.ri-body { margin-top: 4px; padding-left: 4px; }
+/* 全角开括号墨迹偏右，补负偏移让它的视觉左缘与「前置：」「步骤：」及批次标题对齐 */
+.ri-title.hang { margin-left: -3px; }
+.ri-body { margin-top: 4px; }
 .ri-line { font-size: 12px; color: #909399; }
 /* 行间插入位：默认极细一条空隙，hover 才亮起"+ 在此处插入用例"，不打扰阅读 */
 .insert-slot { display: flex; align-items: center; gap: 8px; height: 8px; cursor: pointer; opacity: 0; transition: opacity 0.15s ease, height 0.15s ease; user-select: none; }
