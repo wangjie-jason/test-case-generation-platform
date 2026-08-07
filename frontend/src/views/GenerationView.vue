@@ -4,7 +4,7 @@ import { storeToRefs } from 'pinia'
 import { generationApi, type CaseRecord, type BatchSummary } from '@/api/generation'
 import { ElMessage } from 'element-plus'
 import { useGenerationStore } from '@/stores/generation'
-import { UploadFilled, Loading, Close } from '@element-plus/icons-vue'
+import { UploadFilled, Loading, Close, ArrowRight } from '@element-plus/icons-vue'
 
 const store = useGenerationStore()
 // 生成状态保存在 store 中，切换页面/tab 后回到本页仍保留实时进度与结果
@@ -68,11 +68,19 @@ const openSupplementAgents = ref<number[]>([])
 const batches = ref<BatchSummary[]>([])
 const batchItems = ref<Record<string, CaseRecord[]>>({})
 const loadingBatch = ref<Record<string, boolean>>({})
+const expandedBatch = ref<Record<string, boolean>>({})
 
 async function fetchBatches() {
   try {
     batches.value = await generationApi.listBatches()
   } catch { ElMessage.error('加载生成历史失败') }
+}
+
+// 「刷新」按钮：连 items 缓存与展开态一起重置，否则已展开的批次仍显示旧的懒加载结果
+function refreshHistory() {
+  batchItems.value = {}
+  expandedBatch.value = {}
+  fetchBatches()
 }
 
 async function loadBatchItems(bid: string) {
@@ -89,10 +97,18 @@ async function loadBatchItems(bid: string) {
 
 onMounted(() => { store.fetchKbs(); fetchBatches() })
 
+// 批次标题行即折叠头：点一次展开并懒加载（已加载过只切显隐），再点收起。
+function toggleBatch(bid: string) {
+  expandedBatch.value[bid] = !expandedBatch.value[bid]
+  if (expandedBatch.value[bid]) loadBatchItems(bid)
+}
+
 // 生成结束时 store 会把 historyDirty +1，触发这里重拉批次汇总 + 清空 items 缓存，
 // 避免旧的懒加载数据里少了刚生成的一批。
 watch(historyDirty, () => {
   batchItems.value = {}
+  // 展开态一并收起：items 缓存清了，还留着展开的批次会显示"暂无数据"而不重新拉
+  expandedBatch.value = {}
   fetchBatches()
 })
 
@@ -458,28 +474,41 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
         <template #header>
           <div class="results-toolbar">
             <span>生成历史（{{ batchGroups.length }} 批次）</span>
-            <el-button size="small" @click="fetchBatches">刷新</el-button>
+            <el-button size="small" @click="refreshHistory">刷新</el-button>
           </div>
         </template>
-        <div v-for="b in batchGroups" :key="b.batch_id" class="batch-card">
-          <div class="batch-header">
-            <div><strong class="batch-name">{{ b.req_text?.slice(0, 60) || '未命名需求' }}</strong><span class="batch-meta-info">{{ b.total }} 条 · {{ b.created_at?.slice(0, 16) }}</span></div>
-            <el-dropdown split-button size="small" type="success" @click="downloadBatch(b, 'all')"
-                         @command="(scope: 'all' | 'approved') => downloadBatch(b, scope)">
-              下载 Excel
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="all">全部用例</el-dropdown-item>
-                  <el-dropdown-item command="approved">仅通过用例</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
+        <div v-for="b in batchGroups" :key="b.batch_id" class="batch-card" :class="{ 'is-open': expandedBatch[b.batch_id] }">
+          <!-- 标题行本身就是折叠头：箭头指示展开态，不再另起一行「展开 N 条用例」 -->
+          <div class="batch-header" @click="toggleBatch(b.batch_id)">
+            <el-icon class="batch-arrow"><ArrowRight /></el-icon>
+            <div class="batch-title-block">
+              <!-- 需求文本截断到 60 字，被切掉的部分靠 tooltip 补全（只在真截断时挂） -->
+              <el-tooltip :disabled="(b.req_text?.length || 0) <= 60" :content="b.req_text" placement="top-start" :show-after="300" popper-class="batch-req-tip">
+                <strong class="batch-name">{{ b.req_text?.slice(0, 60) || '未命名需求' }}{{ (b.req_text?.length || 0) > 60 ? '…' : '' }}</strong>
+              </el-tooltip>
+              <span class="batch-meta-info">{{ b.total }} 条 · {{ b.created_at?.slice(0, 16) }}</span>
+            </div>
+            <!-- 下载按钮在折叠头内部，点它不应连带折叠 -->
+            <div class="batch-actions" @click.stop>
+              <el-dropdown split-button size="small" type="success" @click="downloadBatch(b, 'all')"
+                           @command="(scope: 'all' | 'approved') => downloadBatch(b, scope)">
+                下载 Excel
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="all">全部用例</el-dropdown-item>
+                    <el-dropdown-item command="approved">仅通过用例</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </div>
-          <el-collapse @change="(val: string | string[]) => (Array.isArray(val) ? val : [val]).includes(b.batch_id) && loadBatchItems(b.batch_id)">
-            <el-collapse-item :title="`展开 ${b.total} 条用例`" :name="b.batch_id">
-              <div v-if="b.loading" style="text-align:center;color:#909399;padding:10px">加载中...</div>
-              <div v-else-if="!b.items.length" style="text-align:center;color:#909399;padding:10px">暂无数据</div>
-              <div v-else v-for="c in b.items" :key="c.id" style="padding:6px;border-bottom:1px solid #f0f0f0;font-size:13px">
+          <el-collapse-transition>
+          <div class="batch-body" v-show="expandedBatch[b.batch_id]">
+            <div v-if="b.loading" style="text-align:center;color:#909399;padding:10px">加载中...</div>
+            <div v-else-if="!b.items.length" style="text-align:center;color:#909399;padding:10px">暂无数据</div>
+            <!-- 用例列表在批次内部独立滚动（max-height 60vh），批次多时不必整页下滑 -->
+            <div v-else class="case-scroll">
+              <div v-for="c in b.items" :key="c.id" class="hist-item">
                 <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:6px">{{ c.priority }}</el-tag>
                 <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain" style="margin-right:6px">补充</el-tag>
                 <strong>{{ c.title }}</strong>
@@ -487,8 +516,9 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
                 <div v-if="c.steps" style="color:#909399;white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
                 <div v-if="c.expected_result" style="color:#909399">预期：{{ c.expected_result }}</div>
               </div>
-            </el-collapse-item>
-          </el-collapse>
+            </div>
+          </div>
+          </el-collapse-transition>
         </div>
         <el-empty v-if="!batchGroups.length" description="暂无历史" />
       </el-card>
@@ -536,12 +566,34 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
 .match-item { padding: 8px 10px; margin-bottom: 8px; border: 1px solid #ebeef5; border-radius: 8px; background: #fafafa; }
 .match-title { font-size: 13px; font-weight: 600; color: #409EFF; }
 .match-desc { margin-top: 4px; font-size: 12px; line-height: 1.5; color: #606266; white-space: pre-wrap; word-break: break-word; }
-.batch-card { border: 1px solid #e4e7ed; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
-.batch-header { display: flex; justify-content: space-between; align-items: center; }
-.batch-name { font-size: 14px; display: block; }
-.batch-meta-info { display: block; font-size: 12px; color: #909399; margin-top: 2px; }
-.batch-req { display: block; font-size: 12px; color: #909399; }
-.batch-time { display: block; font-size: 11px; color: #c0c4cc; }
+/* 历史批次卡片：标题行即折叠头（整行可点 + 箭头指示）。
+   --gutter 卡片左内边距，--indent 是「箭头 + 间距」宽度，
+   用例标题与批次标题都从 gutter+indent 起，共享同一条左边界。 */
+.batch-card {
+  --gutter: 14px; --indent: 23px;
+  border: 1px solid #e4e7ed; border-radius: 8px; margin-bottom: 12px; overflow: hidden;
+}
+.batch-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px var(--gutter); cursor: pointer; user-select: none;
+  transition: background 0.2s ease;
+}
+.batch-header:hover { background: #f5f9ff; }
+.batch-card.is-open .batch-header { border-bottom: 1px solid #ebeef5; }
+/* 13px 图标 + 10px gap = 23px，与 --indent 一致 */
+.batch-arrow { font-size: 13px; width: 13px; color: #a8abb2; flex-shrink: 0; transition: transform 0.2s ease, color 0.2s ease; }
+.batch-header:hover .batch-arrow { color: #409EFF; }
+.batch-card.is-open .batch-arrow { transform: rotate(90deg); color: #409EFF; }
+.batch-title-block { flex: 1; min-width: 0; }
+.batch-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.batch-name { font-size: 14px; font-weight: 600; line-height: 1.4; color: #303133; display: block; }
+.batch-meta-info { display: block; font-size: 12px; color: #a8abb2; margin-top: 3px; }
+/* 展开后的用例列表：左内边距对齐到批次标题的左边界。
+   滚动放内层：collapse-transition 动画 height，与 max-height 会互相钳制 */
+.batch-body { padding: 0 var(--gutter) 6px; }
+.case-scroll { max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; }
+.hist-item { padding: 10px 0 10px var(--indent); border-bottom: 1px solid #f0f0f0; font-size: 13px; }
+.hist-item:last-child { border-bottom: none; }
 .history-tab { max-width: 960px; margin: 0 auto; }
 .task-list { margin-top: 14px; border-top: 1px solid #ebeef5; padding-top: 10px; }
 .task-list-title { font-size: 12px; color: #909399; margin-bottom: 6px; }
@@ -563,4 +615,10 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
   /* 窄屏改为单列纵向堆叠，两栏各占满整行 */
   .top-panels { grid-template-columns: 1fr; }
 }
+</style>
+
+<!-- tooltip 弹层 teleport 到 body，scoped 选择器管不到，故单开一个非 scoped 块。
+     审核页也有同名一份：路由是懒加载的，不能指望另一个页面已经把样式带进来。 -->
+<style>
+.batch-req-tip { max-width: 420px; line-height: 1.6; }
 </style>
