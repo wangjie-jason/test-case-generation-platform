@@ -70,6 +70,9 @@ const batchItems = ref<Record<string, CaseRecord[]>>({})
 const loadingBatch = ref<Record<string, boolean>>({})
 const expandedBatch = ref<Record<string, boolean>>({})
 
+// 加载态最短展示时长（毫秒）：本地请求常在 100ms 内返回，不兜一下就只看到一闪
+const MIN_LOADING_MS = 200
+
 async function fetchBatches() {
   try {
     batches.value = await generationApi.listBatches()
@@ -86,8 +89,16 @@ function refreshHistory() {
 async function loadBatchItems(bid: string) {
   if (batchItems.value[bid] || loadingBatch.value[bid]) return
   loadingBatch.value[bid] = true
+  // 本地后端往往 100ms 内就返回，骨架一闪而过反而像页面在抖；
+  // 给个最短展示时长，让加载态至少完整出现一次。
+  const startedAt = performance.now()
   try {
-    batchItems.value[bid] = await generationApi.listCases(bid)
+    const items = await generationApi.listCases(bid)
+    const elapsed = performance.now() - startedAt
+    if (elapsed < MIN_LOADING_MS) {
+      await new Promise(r => setTimeout(r, MIN_LOADING_MS - elapsed))
+    }
+    batchItems.value[bid] = items
   } catch (e: any) {
     ElMessage.error(e?.message || '加载批次失败')
   } finally {
@@ -504,8 +515,24 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
           </div>
           <el-collapse-transition>
           <div class="batch-body" v-show="expandedBatch[b.batch_id]">
-            <div v-if="b.loading" style="text-align:center;color:#909399;padding:10px">加载中...</div>
-            <div v-else-if="!b.items.length" style="text-align:center;color:#909399;padding:10px">暂无数据</div>
+            <!-- 骨架屏而非一行文字：加载态得有接近真实列表的高度，
+                 否则展开动画从 0 长到一行、再瞬间跳到全列表，看着像"蹦"一下 -->
+            <div v-if="b.loading" class="batch-loading">
+              <div class="sk-row" v-for="n in 3" :key="n">
+                <el-skeleton animated>
+                  <template #template>
+                    <el-skeleton-item variant="text" style="width:52%;height:14px" />
+                    <div style="margin-top:8px">
+                      <el-skeleton-item variant="text" style="width:34%;height:12px" />
+                    </div>
+                    <div style="margin-top:6px">
+                      <el-skeleton-item variant="text" style="width:62%;height:12px" />
+                    </div>
+                  </template>
+                </el-skeleton>
+              </div>
+            </div>
+            <div v-else-if="!b.items.length" class="batch-placeholder">暂无数据</div>
             <!-- 用例列表在批次内部独立滚动（max-height 60vh），批次多时不必整页下滑 -->
             <div v-else class="case-scroll">
               <div v-for="c in b.items" :key="c.id" class="hist-item">
@@ -591,6 +618,11 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
 /* 展开后的用例列表：左内边距对齐到批次标题的左边界。
    滚动放内层：collapse-transition 动画 height，与 max-height 会互相钳制 */
 .batch-body { padding: 0 var(--gutter) 6px; }
+/* 加载骨架：三行占位，行距与 .hist-item 一致，撑出接近真实列表的高度 */
+.batch-loading { padding: 0; }
+.sk-row { padding: 10px 0 10px var(--indent); border-bottom: 1px solid #f0f0f0; }
+.sk-row:last-child { border-bottom: none; }
+.batch-placeholder { text-align: center; padding: 18px; font-size: 13px; color: #909399; }
 .case-scroll { max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; }
 .hist-item { padding: 10px 0 10px var(--indent); border-bottom: 1px solid #f0f0f0; font-size: 13px; }
 .hist-item:last-child { border-bottom: none; }

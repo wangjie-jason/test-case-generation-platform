@@ -11,6 +11,9 @@ const expandedBatch = ref<Record<string, boolean>>({})
 const loading = ref(false)
 const filterTab = ref<'all' | 'pending' | 'approved' | 'rejected'>('all')
 
+// 加载态最短展示时长（毫秒）：本地请求常在 100ms 内返回，不兜一下就只看到一闪
+const MIN_LOADING_MS = 200
+
 const rejectReasons = [
   { value: 'field_hallucination', label: '字段幻觉' },
   { value: 'rule_hallucination', label: '规则幻觉' },
@@ -34,6 +37,12 @@ const displayBatches = computed(() => batches.value.map(b => {
   return {
     ...b,
     items: filtered,
+    // 当前 tab 下的条数：全部由汇总的 total/reviewed/approved 推出，
+    // 不依赖 items，所以批次没展开时也准（懒加载前 items 是空的）。
+    visibleTotal: filterTab.value === 'all' ? b.total
+      : filterTab.value === 'pending' ? b.total - b.reviewed
+      : filterTab.value === 'approved' ? b.approved
+      : b.reviewed - b.approved,
     loading: !!loadingBatch.value[b.batch_id],
     loaded: !!batchItems.value[b.batch_id],
   }
@@ -55,8 +64,16 @@ async function fetchBatches() {
 async function loadBatchItems(bid: string) {
   if (batchItems.value[bid] || loadingBatch.value[bid]) return
   loadingBatch.value[bid] = true
+  // 本地后端往往 100ms 内就返回，骨架一闪而过反而像页面在抖；
+  // 给个最短展示时长，让加载态至少完整出现一次。
+  const startedAt = performance.now()
   try {
-    batchItems.value[bid] = await generationApi.listCases(bid)
+    const items = await generationApi.listCases(bid)
+    const elapsed = performance.now() - startedAt
+    if (elapsed < MIN_LOADING_MS) {
+      await new Promise(r => setTimeout(r, MIN_LOADING_MS - elapsed))
+    }
+    batchItems.value[bid] = items
   } catch (e: any) {
     ElMessage.error(e?.message || '加载批次失败')
   } finally {
@@ -290,7 +307,12 @@ async function saveInsert() {
           <el-tooltip :disabled="(batch.req_text?.length || 0) <= 60" :content="batch.req_text" placement="top-start" :show-after="300" popper-class="batch-req-tip">
             <strong class="batch-name">{{ batch.req_text?.slice(0, 60) || '未命名需求' }}{{ (batch.req_text?.length || 0) > 60 ? '…' : '' }}</strong>
           </el-tooltip>
-          <span class="batch-meta-info">{{ batch.total }} 条 · {{ batch.created_at?.slice(0, 16) }}</span>
+          <!-- 非「全部」tab 下显示「筛后 / 总数」，让人知道这批被筛掉了多少 -->
+          <span class="batch-meta-info">
+            <template v-if="filterTab === 'all'">{{ batch.total }} 条</template>
+            <template v-else>{{ batch.visibleTotal }} / {{ batch.total }} 条</template>
+            · {{ batch.created_at?.slice(0, 16) }}
+          </span>
         </div>
         <!-- 操作区在折叠头内部，点按钮不应连带折叠 -->
         <div class="batch-actions" @click.stop>
@@ -315,8 +337,24 @@ async function saveInsert() {
 
       <el-collapse-transition>
       <div class="batch-body" v-show="expandedBatch[batch.batch_id]">
-        <div v-if="batch.loading" style="text-align:center;color:#909399;padding:10px">加载中...</div>
-        <div v-else-if="!batch.items.length" style="text-align:center;color:#909399;padding:10px">
+        <!-- 骨架屏而非一行文字：加载态得有接近真实列表的高度，
+             否则展开动画从 0 长到一行、再瞬间跳到全列表，看着像"蹦"一下 -->
+        <div v-if="batch.loading" class="batch-loading">
+          <div class="sk-row" v-for="n in 3" :key="n">
+            <el-skeleton animated>
+              <template #template>
+                <el-skeleton-item variant="text" style="width:52%;height:14px" />
+                <div style="margin-top:8px">
+                  <el-skeleton-item variant="text" style="width:34%;height:12px" />
+                </div>
+                <div style="margin-top:6px">
+                  <el-skeleton-item variant="text" style="width:62%;height:12px" />
+                </div>
+              </template>
+            </el-skeleton>
+          </div>
+        </div>
+        <div v-else-if="!batch.items.length" class="batch-placeholder">
           {{ batch.loaded ? '当前筛选下无匹配用例' : '暂无数据' }}
         </div>
         <!-- 用例列表在批次内部独立滚动（max-height 60vh），批次多时不必整页下滑 -->
@@ -465,6 +503,11 @@ async function saveInsert() {
    滚动放在内层 .case-scroll 而不是 .batch-body：collapse-transition 靠动画
    height 实现，跟 max-height 会互相钳制，展开动画会跳。 */
 .batch-body { padding: 0 var(--gutter) 6px; }
+/* 加载骨架：三行占位，行距与 .review-item 一致，撑出接近真实列表的高度 */
+.batch-loading { padding: 0; }
+.sk-row { padding: 10px 0 10px var(--indent); border-bottom: 1px solid #f0f0f0; }
+.sk-row:last-child { border-bottom: none; }
+.batch-placeholder { text-align: center; padding: 18px; font-size: 13px; color: #909399; }
 .case-scroll { max-height: 60vh; overflow-y: auto; overscroll-behavior: contain; }
 .review-item { padding: 10px 0 10px var(--indent); border-bottom: 1px solid #f0f0f0; }
 .review-item:last-child { border-bottom: none; }
