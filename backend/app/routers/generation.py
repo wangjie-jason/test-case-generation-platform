@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db, now_local
 from app.models.test_case import TestCase
 from app.schemas.generation import GenerateRequest
+from app.services import usage_service
 from app.services.generator_service import GeneratorService
 from app.services.llm_service import LLMServiceError
 from app.services.parser_service import ParserService
@@ -23,7 +24,13 @@ _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 async def generate_clarify(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
     """基于知识库补全需求：返回结构化的完整需求说明（Markdown），供用户确认/编辑后再生成用例。"""
     try:
-        clarified = await GeneratorService.clarify(db, body.requirement_text, kb_ids=body.kb_ids if body.kb_ids else None)
+        # clarify 也要记账：它是一次完整的大 prompt 调用，不记的话看板上
+        # 「累计」会明显小于账单。无批次归属，流水的 batch_id 留 NULL。
+        with usage_service.collector() as usage_records:
+            try:
+                clarified = await GeneratorService.clarify(db, body.requirement_text, kb_ids=body.kb_ids if body.kb_ids else None)
+            finally:
+                await usage_service.flush(db, usage_records)
     except LLMServiceError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return {"clarified_text": clarified}
@@ -101,6 +108,11 @@ async def list_batches(db: AsyncSession = Depends(get_db)):
     )
     review_map = {row.batch_id: (row.reviewed or 0, row.approved or 0) for row in (await db.execute(review_stmt)).all()}
 
+    # 每批的 token 消耗：一次 GROUP BY 出全部批次，避免 N+1。
+    # 该功能上线前的历史批次没有流水，取不到就是 None——前端对 None 不显示，
+    # 不拿 0 冒充「这批没花 token」。
+    token_map = await usage_service.batch_tokens(db)
+
     result = []
     for row in rows:
         reviewed, approved = review_map.get(row.batch_id, (0, 0))
@@ -111,6 +123,7 @@ async def list_batches(db: AsyncSession = Depends(get_db)):
             "approved": approved,
             "req_text": row.req_text or "",
             "created_at": str(row.created_at) if row.created_at else "",
+            "tokens": token_map.get(row.batch_id),
         })
     return result
 
@@ -316,4 +329,4 @@ async def stats_overview(db: AsyncSession = Depends(get_db)):
         # reject_reason 现在有一个特殊值 'edited'：代表 AI 一次没到位、人工微调后可用，
         # 归类到「不通过」但和幻觉/丢弃并列展示，便于识别「差一点点」的用例占比。
         if r.reject_reason: dist[r.reject_reason] = dist.get(r.reject_reason, 0) + 1
-    return {"total_cases": total_n, "reviewed_cases": reviewed, "approved_cases": len(approved), "rejected_cases": len(rejected), "usability_rate": round((len(approved) / reviewed * 100) if reviewed > 0 else 0), "hallucination_distribution": dist, "generation_count": batch_n}
+    return {"total_cases": total_n, "reviewed_cases": reviewed, "approved_cases": len(approved), "rejected_cases": len(rejected), "usability_rate": round((len(approved) / reviewed * 100) if reviewed > 0 else 0), "hallucination_distribution": dist, "generation_count": batch_n, "token_usage": await usage_service.summary(db)}

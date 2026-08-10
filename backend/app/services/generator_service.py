@@ -14,6 +14,7 @@ from app.services.retrieval_service import RetrievalService
 from app.services.validation_service import ValidationService
 from app.utils.case_grouping import merge_supplements, title_prefix
 from app.utils.case_ordering import order_cases
+from app.utils import token_usage
 from app.vectorstore.chroma_client import ChromaStore
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,8 @@ class GeneratorService:
             term_mappings=retrieval["term_mappings"], defect_chunks=retrieval.get("defect_chunks"),
             prd_chunks=retrieval.get("prd_chunks"), historical_cases=historical_cases,
         )
-        return await LLMService().generate(system_content, user_content)
+        with token_usage.stage(token_usage.STAGE_CLARIFY):
+            return await LLMService().generate(system_content, user_content)
 
     @staticmethod
     async def generate_stream(db: AsyncSession, requirement_text: str, kb_ids: list[str] | None = None) -> AsyncGenerator[dict, None]:
@@ -347,7 +349,8 @@ async def _extract_modules(llm, requirement_text: str, prd_chunks: list[dict] | 
     """
     try:
         system, user = PromptService.build_module_split(requirement_text, prd_chunks)
-        raw = await llm.generate(system, user)
+        with token_usage.stage(token_usage.STAGE_MODULE_SPLIT):
+            raw = await llm.generate(system, user)
         parsed = _parse_json_object(raw)
         if not isinstance(parsed, dict):
             logger.warning("模块拆分未返回合法 JSON，退化为单批生成")
@@ -401,12 +404,13 @@ async def _generate_one_batch(
         # 流式收取：边收边把原始文本通过 on_chunk 推给上层展示，同时累积成整段
         # 供后续 _parse_cases 解析。相比一次性 generate()，用户能看到 agent 实时吐字。
         parts: list[str] = []
-        async for piece in llm.generate_stream(base_system, cur_user, on_reasoning=on_reasoning):
-            parts.append(piece)
-            if on_chunk is not None and piece:
-                res = on_chunk(piece)
-                if asyncio.iscoroutine(res):
-                    await res
+        with token_usage.stage(token_usage.STAGE_GENERATE):
+            async for piece in llm.generate_stream(base_system, cur_user, on_reasoning=on_reasoning):
+                parts.append(piece)
+                if on_chunk is not None and piece:
+                    res = on_chunk(piece)
+                    if asyncio.iscoroutine(res):
+                        await res
         raw = "".join(parts)
         cases = [c for c in _parse_cases(raw) if c.get("title") and not c.get("error")]
         # 只累加"未出现过的 title"，避免续写时模型重复吐已有用例。
@@ -592,11 +596,12 @@ async def _review_worker(idx: int, group: dict, emit, system: str,
             await emit("thinking", {"text": text})
 
     parts: list[str] = []
-    async for piece in LLMService().generate_stream(system, _review_prompt(local_cases, local_warnings),
-                                                    on_reasoning=on_reasoning):
-        parts.append(piece)
-        if piece:
-            await emit("chunk", {"text": piece})
+    with token_usage.stage(token_usage.STAGE_REVIEW):
+        async for piece in LLMService().generate_stream(system, _review_prompt(local_cases, local_warnings),
+                                                        on_reasoning=on_reasoning):
+            parts.append(piece)
+            if piece:
+                await emit("chunk", {"text": piece})
 
     parsed = _parse_json_object("".join(parts))
     reviews: list[dict] = []
@@ -640,10 +645,11 @@ async def _supplement_worker(idx: int, item: dict, emit, system: str,
 
     parts: list[str] = []
     prompt = _supplement_prompt(kept, item.get("deleted", []), item.get("gaps", []))
-    async for piece in LLMService().generate_stream(system, prompt, on_reasoning=on_reasoning):
-        parts.append(piece)
-        if piece:
-            await emit("chunk", {"text": piece})
+    with token_usage.stage(token_usage.STAGE_SUPPLEMENT):
+        async for piece in LLMService().generate_stream(system, prompt, on_reasoning=on_reasoning):
+            parts.append(piece)
+            if piece:
+                await emit("chunk", {"text": piece})
 
     cases = [c for c in _parse_cases("".join(parts)) if c.get("title") and not c.get("error")]
     return cases, {"count": len(cases)}

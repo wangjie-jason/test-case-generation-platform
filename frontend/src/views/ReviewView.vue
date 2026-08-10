@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ArrowRight } from '@element-plus/icons-vue'
 import { generationApi, type CaseRecord, type BatchSummary } from '@/api/generation'
+import { formatTokens } from '@/utils/formatTokens'
 
 const batches = ref<BatchSummary[]>([])
 const batchItems = ref<Record<string, CaseRecord[]>>({})
@@ -312,6 +313,9 @@ async function saveInsert() {
             <template v-if="filterTab === 'all'">{{ batch.total }} 条</template>
             <template v-else>{{ batch.visibleTotal }} / {{ batch.total }} 条</template>
             · {{ batch.created_at?.slice(0, 16) }}
+            <!-- 该批的 token 消耗。用量统计上线前的批次没有流水，tokens 为 null 时
+                 整段不显示——显示「0 tokens」会被读成「这批没花钱」，是错的。 -->
+            <template v-if="batch.tokens != null"> · 消耗 {{ formatTokens(batch.tokens) }} tokens</template>
           </span>
         </div>
         <!-- 操作区在折叠头内部，点按钮不应连带折叠 -->

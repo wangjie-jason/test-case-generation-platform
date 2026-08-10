@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     # 目前主要影响 DeepSeek V4 Pro/Flash 等具备"Think"模式的模型；不识别该字段的服务商会忽略。
     LLM_REASONING_EFFORT: str = ""
 
+    # 是否采集 token 用量（流式请求带 stream_options.include_usage，把服务端上报的
+    # usage 记入 llm_usage 表，供看板展示今日/本周/累计消耗与阶段占比）。
+    #   True（默认）= 采集。多出的字段对不支持的服务商是无害的未知字段，会被忽略。
+    #   False = 不带该字段、不记流水。个别服务商对未知字段返回 400 时用它一键回退。
+    LLM_COLLECT_TOKEN_USAGE: bool = True
+
     # ── 分批生成（避免单次响应撞满 max_tokens 被截断）──
     # LLM_ENABLE_MODULE_SPLIT：是否先抽取【模块清单】再按模块分批生成。
     #   True（默认）= 大需求拆成多批，每批更聚焦、更不易截断；抽出的模块 ≤1 个时自动退化为单批。

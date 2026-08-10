@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 实施计划
 
-> 版本 v2.2 | 更新 2026-08-05 | CI（GitHub Actions）+ 回归测试 43 项 + 排序对原有用例零改动（路径层也受 is_movable 约束）+ 生成时自动排序（补充用例归位）+ prompt 标题下钻到功能点 + 补充用例可标识 + 导出可选范围 + 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
+> 版本 v2.3 | 更新 2026-08-10 | Token 用量统计（今日/本周/累计 + 阶段拆分 + 批次级）+ CI（GitHub Actions）+ 回归测试 61 项 + 排序对原有用例零改动（路径层也受 is_movable 约束）+ 生成时自动排序（补充用例归位）+ prompt 标题下钻到功能点 + 补充用例可标识 + 导出可选范围 + 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
 
 ## 当前状态
 - **架构变更**: Project/Module → KnowledgeBase（知识库为核心，卡片式管理）
@@ -28,10 +28,11 @@
 | 死代码清理     | 删除无人调用的 POST /generate、/generate/stream、GenerateResponse 及相关非流式函数         | ✓    |
 | 用例编辑       | 审核阶段可微调 title/precondition/steps/expected_result，只改内容不碰 review 状态（保留原 reject_reason 信号），加 `edited` 标记 | ✓    |
 | 用例顺序       | 规则集中在 `app/utils/case_ordering.py`（生成流程与运维脚本共用）：顶层模块按需求切割顺序成块 → 块内按标题层级路径聚合到子功能级 → 同路径段内按正文共同前缀（≥3 字）单向前移聚合到功能点级。生成时自动排好，无需手工干预；**只挪补充用例、原有用例位置一律不动**——路径层（`place_by_path`）与功能点层（`forward_place`）都受 `is_movable` 约束，锁定用例只作被吸附的锚点；路径层的吸附力 `_affinity` 会压低待插用例的后代路径，避免总纲级补充被自己的细则隔开；`scripts/resort_batch.py` 补排历史批次时不传该约束，走全量排序 | ✓    |
-| 测试与 CI      | `backend/tests/` 43 项回归测试（排序 17 + 前缀解析/归位 26），只装 `pytest` 即可跑；为此把 `_merge_supplements` 等纯字符串函数从 `generator_service` 抽到 `app/utils/case_grouping.py`——后者顶部 import ChromaStore，测试一 import 就连带拉起约 433 MB 的 chromadb，CI 里既慢又脆。`.github/workflows/ci.yml` 在 push main 与向 main 提 PR 时跑后端 pytest（Py3.10）与前端 `npm ci && npm run build`（Node18，含 vue-tsc 类型检查） | ✓    |
+| 测试与 CI      | `backend/tests/` 61 项回归测试（排序 17 + 前缀解析/归位 26 + token 用量采集 18），只装 `pytest` 即可跑：为此把 `_merge_supplements` 等纯字符串函数从 `generator_service` 抽到 `app/utils/case_grouping.py`（后者顶部 import ChromaStore，测试一 import 就连带拉起约 433 MB 的 chromadb），同理把 token 采集逻辑（contextvars 收集器 / usage 解析 / 时间边界）放在 `app/utils/token_usage.py`，落库与聚合留在 `services/usage_service.py`——**采集不依赖 sqlalchemy，测试才能在只装 pytest 的 CI 里 import**（首版把两者写在一个 service 里，CI 直接 `ModuleNotFoundError: sqlalchemy`）。`services/usage_service.py` re-export 采集 API，故调用方无需关心这层拆分。`.github/workflows/ci.yml` 在 push main 与向 main 提 PR 时跑后端 pytest（Py3.10）与前端 `npm ci && npm run build`（Node18，含 vue-tsc 类型检查） | ✓    |
 | 标题粒度约束   | 生成 prompt 硬要求前缀最后一级是功能点、不能停在页面/区块名（给正反例 + 判断标准），补充 prompt 要求复用已有功能点完整前缀；路径自带功能点后字面前缀启发式退化为兜底 | ✓    |
 | 补充用例标识   | 评审后定向补充的用例落库带 `origin='supplement'`，前端在生成结果/历史批次/审核页显示「补充」标签；加列前的历史用例为 NULL、不显示标签（阶段信息已丢失，不反推） | ✓    |
 | 导出范围       | 历史批次「下载 Excel」为 split-button，可选「全部用例 / 仅通过用例」（后者筛 `review.status === 'approved'`，与是否编辑过无关）；生成页用例未入库故不提供该选项 | ✓    |
+| Token 用量统计 | `llm_usage` 流水表（一行 = 一次 chat/completions 请求）。统计分析页显示今日/本周（周一起）/累计消耗、思考 token 占比、按阶段（需求补全/模块拆分/用例生成/评审/补充）拆分条形图；审核页批次卡显示该批消耗。采集靠 `stream_options.include_usage`，`LLM_COLLECT_TOKEN_USAGE=False` 可一键关。归属用 contextvars（`task_service._run` 顶层装一次 collector 覆盖全部并发 worker，各 worker 的 stage 互不串台），失败路径也记账，统计写库失败不连坐生成结果。上线前的历史批次无流水，`tokens` 返回 `null` 而非 0（前端不显示，避免被读成「没花钱」） | ✓    |
 
 ## Context
 
@@ -79,7 +80,7 @@
 │       ├── models/          # 10 SQLAlchemy models (UUID pk)
 │       ├── schemas/         # Pydantic request/response
 │       ├── routers/         # FastAPI route handlers
-│       ├── services/        # 10 service modules
+│       ├── services/        # 12 service modules
 │       ├── vectorstore/     # ChromaDB client
 │       └── utils/
 ├── frontend/
@@ -125,13 +126,13 @@
 - `GET /generate/stream/{task_id}` — 订阅指定任务的 SSE：先重放已缓存事件，再推送实时事件（支持断线重连续看）
 
 #### 审核
-- `GET /cases/batches` — 所有批次的汇总：`[{batch_id, total, reviewed, approved, req_text, created_at}]`。历史/审核页首屏用它渲染折叠卡片，避免一次拉全量被截断。
+- `GET /cases/batches` — 所有批次的汇总：`[{batch_id, total, reviewed, approved, req_text, created_at, tokens}]`。历史/审核页首屏用它渲染折叠卡片，避免一次拉全量被截断。`tokens` 为该批 LLM 消耗，用量统计上线前的批次为 `null`（前端不显示）。
 - `GET /cases?batch_id=<uuid>` — 某个批次的全部用例（无上限）。不传 `batch_id` 时兼容旧调用返回最近 200 条概览。
 - `POST /cases/{id}/review` — 单条审核
 
 #### 导出 & 统计
 - `POST /cases/export` — 请求体为 `{ cases: [...] }`
-- `GET /stats/overview`
+- `GET /stats/overview` — 看板数据。除用例数/可用率/幻觉分布外带 `token_usage`：`{today_tokens, week_tokens, total_tokens, reasoning_tokens, calls, by_stage: [{stage, label, tokens, calls}], since}`。时间口径为 naive Asia/Shanghai（本周 = 周一 00:00 起）；`since` 是首条流水时间，为 `null` 说明还没采到数据，前端据此提示统计起点，避免把「累计 0」误读成「一次都没生成过」。
 
 ### 计划 API
 - 批量审核：`POST /cases/batch-review`

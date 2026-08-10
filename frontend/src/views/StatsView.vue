@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { generationApi, type StatsOverview } from '@/api/generation'
+import { formatTokens } from '@/utils/formatTokens'
 
 const stats = ref<StatsOverview>({
   total_cases: 0,
@@ -35,6 +36,30 @@ function hallucinationPercent(count: number) {
   if (stats.value.reviewed_cases <= 0) return 0
   return Math.round((count / stats.value.reviewed_cases) * 100)
 }
+
+const tokenUsage = computed(() => stats.value.token_usage)
+
+// 阶段条形图按「最大阶段」归一，而不是按总量算百分比——用例生成往往占七成以上，
+// 按总量算的话其余阶段全挤成几乎看不见的细条，失去对比意义。
+const stageMax = computed(() => Math.max(1, ...(tokenUsage.value?.by_stage || []).map(s => s.tokens)))
+
+function stagePercent(tokens: number) {
+  return Math.round((tokens / stageMax.value) * 100)
+}
+
+// 各阶段占总量的比例，跟在条形后面给出真实占比（条长是相对最大值的，不能当占比读）。
+function stageShare(tokens: number) {
+  const total = tokenUsage.value?.total_tokens || 0
+  if (total <= 0) return 0
+  return Math.round((tokens / total) * 100)
+}
+
+// 思考 token 占总量的比例：判断 LLM_REASONING_EFFORT 开到 max 值不值的直接依据。
+const reasoningShare = computed(() => {
+  const u = tokenUsage.value
+  if (!u || u.total_tokens <= 0) return 0
+  return Math.round((u.reasoning_tokens / u.total_tokens) * 100)
+})
 </script>
 
 <template>
@@ -53,6 +78,35 @@ function hallucinationPercent(count: number) {
       </el-col>
       <el-col :span="6">
         <div class="stat-card"><div class="stat-num">{{ stats.generation_count || 0 }}</div><div class="stat-label">生成批次</div></div>
+      </el-col>
+    </el-row>
+
+    <!-- Token 消耗指标行。token_usage 缺失说明后端还没升级到带用量的版本，整行不渲染，
+         而不是显示一排 0 让人误以为一次都没调用过。 -->
+    <el-row v-if="tokenUsage" :gutter="20" type="flex" class="stat-row" style="margin-top:20px">
+      <el-col :span="6">
+        <div class="stat-card">
+          <div class="stat-num">{{ formatTokens(tokenUsage.today_tokens) }}</div>
+          <div class="stat-label">今日 tokens</div>
+        </div>
+      </el-col>
+      <el-col :span="6">
+        <div class="stat-card">
+          <div class="stat-num">{{ formatTokens(tokenUsage.week_tokens) }}</div>
+          <div class="stat-label">本周 tokens（周一起）</div>
+        </div>
+      </el-col>
+      <el-col :span="6">
+        <div class="stat-card">
+          <div class="stat-num">{{ formatTokens(tokenUsage.total_tokens) }}</div>
+          <div class="stat-label">累计 tokens · {{ tokenUsage.calls }} 次调用</div>
+        </div>
+      </el-col>
+      <el-col :span="6">
+        <div class="stat-card">
+          <div class="stat-num">{{ formatTokens(tokenUsage.reasoning_tokens) }}<span class="stat-pct thinking"> / {{ reasoningShare }}%</span></div>
+          <div class="stat-label">其中思考 tokens</div>
+        </div>
       </el-col>
     </el-row>
 
@@ -75,6 +129,34 @@ function hallucinationPercent(count: number) {
           </div>
           <el-progress :percentage="stats.usability_rate || 0" :color="stats.usability_rate >= 85 ? '#67C23A' : '#E6A23C'" :stroke-width="16" />
           <div class="quality-target">{{ stats.usability_rate >= 85 ? '✅ 已达标' : '⚠️ 继续优化知识库' }}（目标 ≥ 85%）</div>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-row v-if="tokenUsage" :gutter="20" type="flex" style="margin-top:24px">
+      <el-col :span="24">
+        <el-card shadow="never" class="mid-card">
+          <template #header>
+            <span>Token 消耗（按阶段）</span>
+            <!-- 明确统计起点：功能上线前的调用没有流水，不写清楚会让人把「累计」当成历史总量 -->
+            <span v-if="tokenUsage.since" class="stage-since">统计自 {{ tokenUsage.since.slice(0, 16) }}</span>
+          </template>
+          <div v-if="!tokenUsage.by_stage.length" style="text-align:center;padding:32px;color:#909399">
+            暂无用量数据，生成一次用例后即可看到各阶段消耗
+          </div>
+          <template v-else>
+            <div v-for="s in tokenUsage.by_stage" :key="s.stage" class="hall-item">
+              <span class="stage-name">{{ s.label }}</span>
+              <div class="hall-bar-wrap">
+                <div class="hall-bar stage-bar" :style="{width: stagePercent(s.tokens) + '%'}"></div>
+              </div>
+              <span class="stage-num">{{ formatTokens(s.tokens) }}</span>
+              <span class="stage-share">{{ stageShare(s.tokens) }}%</span>
+              <span class="stage-calls">{{ s.calls }} 次</span>
+            </div>
+            <!-- 条长是相对「最大阶段」的，占比看后面的百分比列，这里明说避免误读 -->
+            <div class="stage-hint">条形长度相对消耗最大的阶段，百分比为占累计总量的比例</div>
+          </template>
         </el-card>
       </el-col>
     </el-row>
@@ -106,6 +188,14 @@ function hallucinationPercent(count: number) {
 .hall-bar-wrap { flex: 1; background: #f0f0f0; border-radius: 4px; height: 10px; overflow: hidden; }
 .hall-bar { background: #E6A23C; height: 100%; border-radius: 4px; min-width: 2px; transition: width .3s; }
 .hall-num { font-size: 12px; color: #909399; width: 40px; flex-shrink: 0; text-align: right; }
+.stat-pct.thinking { color: #909399; }
+.stage-name { width: 72px; font-size: 13px; color: #606266; flex-shrink: 0; }
+.stage-bar { background: #409EFF; }
+.stage-num { font-size: 12px; color: #303133; width: 56px; flex-shrink: 0; text-align: right; }
+.stage-share { font-size: 12px; color: #909399; width: 40px; flex-shrink: 0; text-align: right; }
+.stage-calls { font-size: 12px; color: #C0C4CC; width: 48px; flex-shrink: 0; text-align: right; }
+.stage-since { float: right; font-size: 12px; color: #C0C4CC; font-weight: 400; }
+.stage-hint { margin-top: 10px; font-size: 12px; color: #C0C4CC; }
 .quality-circle { text-align: center; padding: 12px 0 20px; }
 .quality-num { font-size: 52px; font-weight: 700; }
 .quality-sub { font-size: 14px; color: #909399; margin-top: 4px; }

@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 设计方案
 
-> 版本 v0.23 | 更新 2026-08-05 | 状态：CI + 回归测试 43 项（排序逻辑与向量库依赖解耦）
+> 版本 v0.24 | 更新 2026-08-10 | 状态：CI + 回归测试 61 项（新增 token 用量采集）
 
 ## 修订记录
 
@@ -26,6 +26,7 @@
 | v0.21 | 2026-08-04 | 生成时**自动排序**，不必再手工跑 `resort_batch.py`：排序规则提到 `app/utils/case_ordering.py` 与运维脚本共用（函数接 `title_of` 回调，故既能排 ORM 对象也能排 dict），避免两处各写一份、改一边漏一边。生成流程在补充合并之后、`validate_cases` **之前**调 `order_cases`——前者保证补充用例参与归位，后者保证告警的 `case_index` 与最终顺序对齐。**只挪补充用例**（`is_movable=origin=='supplement'`），原有用例位置一律不动：用重排前的备份库统计，LLM 原始产出里 350 个子功能路径仅 6 个被拆段（涉及 71/1082 条），生成阶段本就整齐；而功能点判定靠字面共同前缀这一启发式，会把「点击X跳转并筛选」这类同句式的跨功能点用例误吸到一起，动原有用例收益小、风险大。实测：无补充用例时 0 条位置变化，有补充时原有相对顺序不变、顶层块序不变、幂等。另治本一手——生成 prompt 增加硬约束「前缀最后一级必须是功能点，不能停在页面/区块名」并给正反例（❌`【提交页】验证现场照片添加与删除` → ✅`【提交页-现场照片】数量上限9张边界值`），补充 prompt 要求复用已有功能点的完整前缀；路径自带功能点后，字面前缀启发式退化为兜底。|
 | v0.22 | 2026-08-05 | 修正 v0.21 的 `is_movable` 只拦住第 3 层：第 2 层的路径层级排序（`sort_block_by_path`，原 `resort_block` 内联）是**全量重排**，会把块内交错的同路径用例并段——`【模块-登录】【模块-注册】【模块-登录】` 三条原有用例即便一条补充都没有，也会被重排成登录、登录、注册。这与「原有用例位置一律不动」的承诺相悖。现拆出 `place_by_path`：锁定用例按原序构成骨架、一条都不排，可动用例再逐条按路径最长公共前缀插到所属簇尾（`len_common_segs`）；`resort_block` 据 `is_movable` 二选一——不传走全量排序（运维脚本补排历史批次的语义不变），传了走只插不排（生成流程）。吸附力用 `_affinity` 打二元组分而非单看公共层数：光比公共前缀分不出「路径完全相同」和「我是你的祖先」——总纲 `【提交页】` 与细则 `【提交页-日常走访】` 对一条 `【提交页】` 补充的公共层数都是 2，同分取更靠后就把补充推到了细则之后，**总纲与总纲被细则隔开**（正是 v0.18 单向前移要避免的倒置，只是这次发生在路径层）。故把 supp 的后代降一档，补充遂紧跟同级总纲之后。实测：整批模式在两个库上与重构前**逐条 ID 完全一致**（脚本 dry-run 对已排好的库仍报 0 变化）；锁定模式零补充时 0 挪动，48 个锚点 × 3 个插入位置注入补充、以及 20 组 3~20 条随机补充的压力测试中，原有用例顺序打乱 0 次、补充精确落到同路径簇尾 48/48、集合一致且幂等；400 次单条补充注入中「补充紧跟同级用例」400/400（修 `_affinity` 前此项有反例）。另更正 v0.22 初版的一处论断：曾以「补充用例可能被 `_merge_supplements` 插到所属子模块首条之前」论证必须先摆完整骨架，实测 200 次单条补充**全部**落在簇末之后、0 次落在簇首之前，且骨架版与边遍历边插版在 300 组随机补充上输出完全相同——该理由不成立，已从 docstring 移除（保留先摆骨架的写法，因其与流式版等价而更易读）。|
 | v0.23 | 2026-08-05 | 补 CI（GitHub Actions）与回归测试 43 项。**为让测试摆脱向量库依赖**，把 `_title_prefix`/`_title_path`/`_common_prefix_len`/`_merge_supplements` 从 `generator_service` 抽到 `app/utils/case_grouping.py`（公开命名去掉下划线）：`generator_service` 顶部 import ChromaStore，测试一 import 就连带拉起 chromadb（实测约 433 MB / 80 秒），而这几个函数只做字符串与列表处理。抽出后 CI 只装 `pytest`（32 MB / 5 秒），测试耗时从 0.45s 降到 0.02s。搬迁**未合并**`case_grouping.title_path` 与 `case_ordering.title_segs`——两者对空段的处理不同（`【A--B】` → `['A','B']` vs `('A','','B')`），是归位与排序各自的既有行为，合并等于悄悄改掉一条；已补测试钉住该差异。等价性用真实数据验证：1091 个标题（含 1082 条真实用例）、2000 组随机路径、60 组随机补充，与旧实现**逐条零差异**。测试有效性用变异测试验证：注入「顺手统一空段语义」「同分不取更靠后」「就地改传入列表」三个 bug，各被 2 项测试抓住。CI 跑 push main 与 PR：后端 pytest（Py3.10 取版本下限）、前端 `npm ci && npm run build`（Node18，`build` 含 vue-tsc 类型检查）；并发组设 cancel-in-progress 避免连续 push 排队。|
+| v0.24 | 2026-08-10 | **Token 用量统计**：新增 `llm_usage` 流水表（一行 = 一次 chat/completions 请求，含续写每轮与各并行模块），统计分析页展示今日/本周/累计消耗、思考 token 占比、按阶段拆分条形图，审核页批次卡显示该批消耗。采集靠流式请求带 `stream_options.include_usage`（`LLM_COLLECT_TOKEN_USAGE` 可一键关，应对个别服务商对未知字段报 400）。两处实现要点：① **usage 必须在取 `choices[0]` 之前读**——带 usage 的那个 chunk 里 `choices` 是空数组，先取下标会抛 `IndexError` 被既有的 `except (JSONDecodeError, KeyError, IndexError)` 吞掉，usage 永远采不到；② 归属靠 **contextvars** 而非改调用签名：`LLMService()` 在 clarify/模块拆分/生成/评审/补充 5 处各自 new，其中 3 处跑在 `create_task` 起的并发 worker 里，透传 stage 要改遍所有 worker 签名与 `_parallel_agents` 协议；`create_task` 复制创建时的上下文，故在 `task_service._run` 顶层装一次 `collector()` 就能收齐全部并发调用，而各 worker 内 `stage()` 只改自己的副本、并发下不串台（已用交错 await 的并发测试钉住）。落库时机在生成结束、拿到 `batch_id` 后一次性 flush（批次级消耗靠它），且放在 `async_session` 内层的 `finally`——**失败路径也记账**，token 已经花掉了，撞限流前那几轮的消耗更该被看见。统计失败绝不连坐生成：`flush` 整体 try 住，出错只打日志。时间口径沿用 `now_local()`（naive Asia/Shanghai），与 `test_cases.created_at` 一致，「今日/本周（周一起）」直接按日期比较无需时区换算。功能上线前的历史批次没有流水，`tokens` 返回 `null` 而非 0，前端不显示——「0 tokens」会被读成「这批没花钱」，是错的。**模块分工**：采集逻辑（contextvars 收集器、usage 解析、时间边界）在 `app/utils/token_usage.py`，落库与聚合在 `services/usage_service.py`，后者 re-export 前者的公开 API 使调用方无需关心拆分。这层拆分不是洁癖而是 CI 的硬约束——CI 只装 `pytest`（避开 chromadb 与 torch），采集若与 sqlalchemy 同处一个模块，测试一 import 就 `ModuleNotFoundError`（首版正是如此挂掉的），与 v0.23 抽 `case_grouping` 同一动因。|
 
 > 后续每次修改设计时，在此表追加一行（版本、日期、主要变更）。
 
@@ -426,6 +427,11 @@ prd_documents   -- PRD文档 (id, kb_id, filename, file_format, raw_text, chunk_
 defect_records  -- 缺陷记录 (id, kb_id, title, severity, root_cause, description, related_case, occurred_at, created_at)
 test_cases      -- 用例 (id, title, priority, precondition, steps, expected_result, source[manual|ai], quality_score, knowledge_refs[json], batch_id, req_text, edited, edited_at, created_at)
 review_records  -- 审核记录 (id, case_id, status[approved|rejected], reject_reason, reviewer_comment, reviewed_at)
+llm_usage       -- LLM token 流水 (id, stage[clarify|module_split|generate|review|supplement], model, prompt_tokens, completion_tokens, reasoning_tokens, total_tokens, batch_id, created_at)
+                -- 一行 = 一次 chat/completions 请求（含续写每轮、各并行模块各一行）。
+                -- reasoning_tokens 已含在 completion_tokens 内，单独存一份用于判断高 reasoning_effort 值不值。
+                -- batch_id 可空：clarify 阶段没有批次；生成任务结束拿到 batch_id 后回填，供批次级消耗展示。
+                -- 不挂外键：调用与用例不是一对一（拆分/评审/补充都不直接产出某条用例）。
 
 -- ChromaDB collections:
 --   prd_docs         -- PRD文档分块向量化

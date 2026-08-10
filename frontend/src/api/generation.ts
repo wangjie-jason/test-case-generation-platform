@@ -99,6 +99,30 @@ export interface BatchSummary {
   approved: number
   req_text: string
   created_at: string
+  // 该批次的 token 消耗。用量统计上线前的历史批次没有流水，此时为 null——
+  // 前端对 null 不显示，不拿 0 冒充「这批没花 token」。
+  tokens?: number | null
+}
+
+// 按阶段拆分的 token 消耗，用来回答「钱花在哪个环节」。
+export interface TokenUsageByStage {
+  stage: string
+  label: string
+  tokens: number
+  calls: number
+}
+
+export interface TokenUsage {
+  today_tokens: number
+  week_tokens: number
+  total_tokens: number
+  // 推理模型的思考 token（已含在 completion 内），用于判断高 reasoning_effort 值不值。
+  reasoning_tokens: number
+  calls: number
+  by_stage: TokenUsageByStage[]
+  // 首条流水的时间。为 null 说明还没采到数据，前端据此提示「统计自 X 起」，
+  // 免得把「累计 0」误读成「一次都没生成过」。
+  since: string | null
 }
 
 export interface StatsOverview {
@@ -109,6 +133,7 @@ export interface StatsOverview {
   usability_rate: number
   hallucination_distribution: Record<string, number>
   generation_count: number
+  token_usage?: TokenUsage
 }
 
 export interface GenerationTaskSummary {
