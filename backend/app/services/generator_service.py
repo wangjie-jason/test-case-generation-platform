@@ -8,13 +8,13 @@ from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.services import usage_service
 from app.services.llm_service import LLMService
 from app.services.prompt_service import PromptService
 from app.services.retrieval_service import RetrievalService
 from app.services.validation_service import ValidationService
 from app.utils.case_grouping import merge_supplements, title_prefix
 from app.utils.case_ordering import order_cases
+from app.utils import token_usage
 from app.vectorstore.chroma_client import ChromaStore
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ class GeneratorService:
             term_mappings=retrieval["term_mappings"], defect_chunks=retrieval.get("defect_chunks"),
             prd_chunks=retrieval.get("prd_chunks"), historical_cases=historical_cases,
         )
-        with usage_service.stage(usage_service.STAGE_CLARIFY):
+        with token_usage.stage(token_usage.STAGE_CLARIFY):
             return await LLMService().generate(system_content, user_content)
 
     @staticmethod
@@ -349,7 +349,7 @@ async def _extract_modules(llm, requirement_text: str, prd_chunks: list[dict] | 
     """
     try:
         system, user = PromptService.build_module_split(requirement_text, prd_chunks)
-        with usage_service.stage(usage_service.STAGE_MODULE_SPLIT):
+        with token_usage.stage(token_usage.STAGE_MODULE_SPLIT):
             raw = await llm.generate(system, user)
         parsed = _parse_json_object(raw)
         if not isinstance(parsed, dict):
@@ -404,7 +404,7 @@ async def _generate_one_batch(
         # 流式收取：边收边把原始文本通过 on_chunk 推给上层展示，同时累积成整段
         # 供后续 _parse_cases 解析。相比一次性 generate()，用户能看到 agent 实时吐字。
         parts: list[str] = []
-        with usage_service.stage(usage_service.STAGE_GENERATE):
+        with token_usage.stage(token_usage.STAGE_GENERATE):
             async for piece in llm.generate_stream(base_system, cur_user, on_reasoning=on_reasoning):
                 parts.append(piece)
                 if on_chunk is not None and piece:
@@ -596,7 +596,7 @@ async def _review_worker(idx: int, group: dict, emit, system: str,
             await emit("thinking", {"text": text})
 
     parts: list[str] = []
-    with usage_service.stage(usage_service.STAGE_REVIEW):
+    with token_usage.stage(token_usage.STAGE_REVIEW):
         async for piece in LLMService().generate_stream(system, _review_prompt(local_cases, local_warnings),
                                                         on_reasoning=on_reasoning):
             parts.append(piece)
@@ -645,7 +645,7 @@ async def _supplement_worker(idx: int, item: dict, emit, system: str,
 
     parts: list[str] = []
     prompt = _supplement_prompt(kept, item.get("deleted", []), item.get("gaps", []))
-    with usage_service.stage(usage_service.STAGE_SUPPLEMENT):
+    with token_usage.stage(token_usage.STAGE_SUPPLEMENT):
         async for piece in LLMService().generate_stream(system, prompt, on_reasoning=on_reasoning):
             parts.append(piece)
             if piece:

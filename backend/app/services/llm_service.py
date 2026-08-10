@@ -7,7 +7,9 @@ from typing import AsyncGenerator
 import httpx
 
 from app.config import settings
-from app.services import usage_service
+# 只用采集函数，故直接指向纯逻辑模块而不是 services.usage_service——后者依赖
+# sqlalchemy，而 CI 只装 pytest，从这里牵进 sqlalchemy 会让轻量测试无法 import。
+from app.utils import token_usage
 
 
 logger = logging.getLogger(__name__)
@@ -186,7 +188,7 @@ class LLMService:
                                     # chunk 里 choices 是空数组，先 data["choices"][0] 会抛
                                     # IndexError 被下面的 except 吞掉，usage 就永远采不到。
                                     if data.get("usage"):
-                                        usage_service.record(self.model, data["usage"])
+                                        token_usage.record(self.model, data["usage"])
                                     if not data.get("choices"):
                                         continue
                                     choice = data["choices"][0]
