@@ -5,6 +5,7 @@ import uuid as _uuid
 
 from app.database import async_session, now_local
 from app.models.test_case import TestCase
+from app.services import usage_service
 from app.services.generator_service import GeneratorService
 from app.services.indexing_service import IndexingService
 from app.services.llm_service import LLMServiceError
@@ -125,14 +126,26 @@ class TaskManager:
     @classmethod
     async def _run(cls, task: GenerationTask) -> None:
         # 使用独立的 DB 会话，使任务脱离 HTTP 请求生命周期：客户端断开/刷新后任务继续。
+        # token 用量收集器必须装在这里（起并发 worker 之前）：generate_stream 内部用
+        # create_task 起模块/评审/补充 worker，它们复制的是创建那一刻的上下文，
+        # 装晚了就收不到这些并发调用的用量。
+        batch_id: str | None = None
         try:
-            async with async_session() as db:
-                async for event in GeneratorService.generate_stream(
-                    db, task.requirement_text, kb_ids=task.kb_ids or None
-                ):
-                    if event.get("type") == "complete":
-                        await persist_cases(db, event.get("cases", []), task.batch_name, task.requirement_text)
-                    task._emit(event)
+            with usage_service.collector() as usage_records:
+                async with async_session() as db:
+                    try:
+                        async for event in GeneratorService.generate_stream(
+                            db, task.requirement_text, kb_ids=task.kb_ids or None
+                        ):
+                            if event.get("type") == "complete":
+                                batch_id = await persist_cases(db, event.get("cases", []), task.batch_name, task.requirement_text)
+                            task._emit(event)
+                    finally:
+                        # 无论成功、报错还是中途异常都要记账：token 已经花掉了，
+                        # 失败的消耗更该被看见（尤其是撞限流前那几轮）。放在
+                        # async_session 内层的 finally，保证 flush 时 db 仍可用。
+                        # 生成失败时 batch_id 为 None，流水归入「未关联批次」。
+                        await usage_service.flush(db, usage_records, batch_id)
             task.status = "done"
         except LLMServiceError as exc:
             task._emit({"type": "error", "message": str(exc)})

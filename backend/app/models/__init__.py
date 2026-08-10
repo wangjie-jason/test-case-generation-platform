@@ -2,6 +2,7 @@ from app.models.business_rule import BusinessRule  # noqa: F401
 from app.models.defect_record import DefectRecord  # noqa: F401
 from app.models.field_dict import FieldDict  # noqa: F401
 from app.models.knowledge_base import KnowledgeBase  # noqa: F401
+from app.models.llm_usage import LlmUsage  # noqa: F401
 from app.models.prd_document import PrdDocument  # noqa: F401
 from app.models.review_record import ReviewRecord  # noqa: F401
 from app.models.state_machine import StateMachine  # noqa: F401

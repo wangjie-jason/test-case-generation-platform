@@ -7,6 +7,7 @@ from typing import AsyncGenerator
 import httpx
 
 from app.config import settings
+from app.services import usage_service
 
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,12 @@ class LLMService:
         }
         if stream:
             payload["stream"] = True
+            # 请服务端在流的最后一个 chunk 带上 usage（OpenAI 兼容协议约定）。
+            # 流式默认不返回 usage，不加这个字段就统计不到 token 消耗。
+            # 个别服务商不认这个字段——多数会忽略，但若遇到直接报 400 的，
+            # 把 LLM_COLLECT_TOKEN_USAGE 置 False 一键关掉即可。
+            if settings.LLM_COLLECT_TOKEN_USAGE:
+                payload["stream_options"] = {"include_usage": True}
         if self.reasoning_effort:
             # OpenAI 兼容协议下的思考强度字段。不支持的服务商会自动忽略，安全。
             payload["reasoning_effort"] = self.reasoning_effort
@@ -175,6 +182,13 @@ class LLMService:
                                     break
                                 try:
                                     data = json.loads(chunk)
+                                    # usage 必须在取 choices[0] 之前处理：带 usage 的那个
+                                    # chunk 里 choices 是空数组，先 data["choices"][0] 会抛
+                                    # IndexError 被下面的 except 吞掉，usage 就永远采不到。
+                                    if data.get("usage"):
+                                        usage_service.record(self.model, data["usage"])
+                                    if not data.get("choices"):
+                                        continue
                                     choice = data["choices"][0]
                                     # 记录 finish_reason：多数服务在最后一个 chunk 才带非空值，
                                     # 逐 chunk 覆盖即可拿到最终值（续写分批据此判断是否被截断）。
