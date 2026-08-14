@@ -12,7 +12,7 @@ from app.services.llm_service import LLMService
 from app.services.prompt_service import PromptService
 from app.services.retrieval_service import RetrievalService
 from app.services.validation_service import ValidationService
-from app.utils.case_grouping import merge_supplements, title_prefix
+from app.utils.case_grouping import merge_supplements, title_path, title_prefix
 from app.utils.case_ordering import order_cases
 from app.utils import token_usage
 from app.vectorstore.chroma_client import ChromaStore
@@ -351,7 +351,7 @@ async def _extract_modules(llm, requirement_text: str, prd_chunks: list[dict] | 
         system, user = PromptService.build_module_split(requirement_text, prd_chunks)
         with token_usage.stage(token_usage.STAGE_MODULE_SPLIT):
             raw = await llm.generate(system, user)
-        parsed = _parse_json_object(raw)
+        parsed = _parse_json_object(raw, require_key="modules")
         if not isinstance(parsed, dict):
             logger.warning("模块拆分未返回合法 JSON，退化为单批生成")
             return None
@@ -482,7 +482,7 @@ def _review_prompt(cases: list[dict], warnings: list[dict]) -> str:
     if warnings:
         wt = "\n".join(f"- #{w['case_index']} {'; '.join(w['warnings'])}" for w in warnings[:10])
         warn_text = f"\n\n## 自动校验已发现的问题（供参考）\n{wt}"
-    return f"""你现在是测试评审专家。请逐条评审下面已生成的测试用例，判断每条是「保留」还是「删除」。
+    return f"""你现在是测试评审专家。请逐条评审下面已生成的测试用例，挑出其中**应当删除**的。
 
 删除标准（满足任一即删）：
 - 引用了不存在的字段/规则，或预期结果违反业务规则
@@ -490,14 +490,18 @@ def _review_prompt(cases: list[dict], warnings: list[dict]) -> str:
 - 步骤或预期含糊、不可执行、自相矛盾
 - 明显偏离需求
 
-注意：不要改写用例内容，只做保留/删除判断。同时指出整体上还遗漏了哪些应覆盖但当前没有的场景。
+注意：不要改写用例内容，只做删除判断。同时指出整体上还遗漏了哪些应覆盖但当前没有的场景。
 
 ## 待评审用例（共 {len(cases)} 条）
 {briefs}{warn_text}
 
+**只列出要删除的用例**，判定保留的一律不要输出——未列出的自动视为保留。逐条输出 keep
+会让响应长度随用例数线性膨胀、撑满 token 上限，一旦被截断，后面所有判定都会丢失。
+index 必须照抄上面每条用例前的 #编号，不要自己重新数。
+
 只输出如下 JSON（不要 markdown 代码块）：
 {{
-  "reviews": [{{"index": <用例序号>, "verdict": "keep|delete", "reason": "<简短理由>"}}],
+  "reviews": [{{"index": <用例序号>, "verdict": "delete", "reason": "<简短理由>"}}],
   "gaps": ["<遗漏场景1>", "<遗漏场景2>"]
 }}"""
 
@@ -569,19 +573,47 @@ async def _parallel_agents(items: list[dict], worker_factory, phase: str):
 
 
 def _group_by_module(cases: list[dict]) -> list[dict]:
-    """按标题【】里的顶层模块把用例分组，保留每条用例的全局下标（供评审结论映射回整批）。
-    无模块前缀的归入「其它」。返回 [{"module": 名, "items": [(global_idx, case), ...]}]。"""
+    """按标题【】里的**前两级**模块路径把用例分组，保留每条用例的全局下标（供评审结论
+    映射回整批）。无模块前缀的归入「其它」。
+    返回 [{"module": 名, "items": [(global_idx, case), ...]}]。
+
+    取两级而非只取顶层：顶层前缀只是【】里 - 之前的第一段，实测 1097 条的批次里「PC」
+    一个模块就独占 629 条，一次性塞进评审 prompt 会撞满 max_tokens，截断后整组判定
+    静默丢失。取两级后最大组降到 107 条，且分组边界跟着内容自己的层级走——顶层分组
+    再按条数切出的 `PC (2/4)` 既看不出在评审什么，边界也全落在二级模块中间，换个
+    PRD（全部功能挂在同一顶层模块下）就完全退化成纯数字切块。
+    判重能力两种分法是平局：实测同二级模块内被切开的疑似重复对与跨二级模块本可判出
+    的对数各 1，净效应为零，故不作为取舍依据。
+
+    LLM_REVIEW_BATCH_SIZE 降级为兜底：仅当单个二级模块仍然超限时才按条数均分切块。
+    切块后卡片标题带 (n/N) 后缀，便于在前端区分同一模块的多个评审 agent。
+    """
     groups: dict[str, list[tuple[int, dict]]] = {}
     for i, c in enumerate(cases):
-        key = title_prefix(c.get("title", "")) or "其它"
+        path = title_path(c.get("title", ""))
+        key = "-".join(path[:2]) if path else "其它"
         groups.setdefault(key, []).append((i, c))
-    return [{"module": k, "items": v} for k, v in groups.items()]
+    cap = max(1, settings.LLM_REVIEW_BATCH_SIZE)
+    out: list[dict] = []
+    for key, items in groups.items():
+        if len(items) <= cap:
+            out.append({"module": key, "items": items})
+            continue
+        # 均分而非按 cap 贪心切：500 条按 cap=200 贪心会切出 200/200/100，最后那块
+        # 明显偏小却同样白占一次调用和一张卡片；先算块数再均分得到 167/167/166。
+        n_chunks = -(-len(items) // cap)
+        size = -(-len(items) // n_chunks)
+        chunks = [items[s:s + size] for s in range(0, len(items), size)]
+        for n, chunk in enumerate(chunks, 1):
+            out.append({"module": f"{key} ({n}/{len(chunks)})", "items": chunk})
+    return out
 
 
 async def _review_worker(idx: int, group: dict, emit, system: str,
                          warnings_by_global: dict[int, dict]) -> tuple[dict, dict]:
     """评审单个模块分组：流式吐评审 JSON（思考流经 emit 实时下发），解析后把每条 review
-    的局部 index 映射回全局下标。返回 ({reviews, gaps}, {kept, deleted}) 供上层收口/展示。"""
+    的局部 index 映射回全局下标。返回 ({reviews, gaps}, {kept, deleted[, truncated]})
+    供上层收口/展示。新契约下模型只列待删条目，未列出的由 _apply_review 默认保留。"""
     items = group["items"]  # [(global_idx, case), ...]
     local_cases = [c for _, c in items]
     # 该组的校验告警按局部下标重映射，保证 prompt 里的 #编号与该组用例对齐。
@@ -596,28 +628,49 @@ async def _review_worker(idx: int, group: dict, emit, system: str,
             await emit("thinking", {"text": text})
 
     parts: list[str] = []
+    llm = LLMService()
     with token_usage.stage(token_usage.STAGE_REVIEW):
-        async for piece in LLMService().generate_stream(system, _review_prompt(local_cases, local_warnings),
-                                                        on_reasoning=on_reasoning):
+        async for piece in llm.generate_stream(system, _review_prompt(local_cases, local_warnings),
+                                               on_reasoning=on_reasoning):
             parts.append(piece)
             if piece:
                 await emit("chunk", {"text": piece})
 
-    parsed = _parse_json_object("".join(parts))
+    raw = "".join(parts)
+    # 截断检测：生成阶段撞满 max_tokens 会走续写兜底，评审此前什么都不做——JSON 不闭合、
+    # 解析失败，整组判定静默按「全部保留」处理（前端卡片里却已经流过 delete 的判定，
+    # 于是"评审说删了但用例还在"）。这里显式识别并抢救已经判完的那部分。
+    truncated = llm.last_finish_reason == "length"
+    parsed = _parse_json_object(raw, require_key="reviews")
+    raw_reviews = parsed.get("reviews") if isinstance(parsed, dict) else None
+    if not isinstance(raw_reviews, list):
+        raw_reviews = _salvage_reviews(raw)
+        if raw_reviews:
+            logger.warning("评审[%s]输出%s，抢救出 %d 条判定（考虑调小 LLM_REVIEW_BATCH_SIZE）",
+                           group["module"], "被截断" if truncated else "无法整体解析", len(raw_reviews))
+        else:
+            logger.warning("评审[%s]输出无法解析（truncated=%s, len=%d, tail=%r），该组用例全部按保留处理",
+                           group["module"], truncated, len(raw), raw[-200:])
+
     reviews: list[dict] = []
+    unusable = 0
+    for r in raw_reviews:
+        if not isinstance(r, dict) or not isinstance(r.get("index"), int) or not 0 <= r["index"] < len(items):
+            unusable += 1
+            continue
+        reviews.append({**r, "index": items[r["index"]][0]})  # 局部 → 全局
+    if unusable:
+        # 模型自己数错 #编号（越界）或漏了 index 字段时，此前是静默丢弃，等于判定白做。
+        logger.warning("评审[%s]有 %d 条判定的 index 缺失或越界，已忽略", group["module"], unusable)
     gaps: list = []
     if isinstance(parsed, dict):
-        raw_reviews = parsed.get("reviews", [])
-        if isinstance(raw_reviews, list):
-            for r in raw_reviews:
-                if isinstance(r, dict) and isinstance(r.get("index"), int):
-                    li = r["index"]
-                    if 0 <= li < len(items):
-                        reviews.append({**r, "index": items[li][0]})  # 局部 → 全局
         raw_gaps = parsed.get("gaps", [])
         gaps = raw_gaps if isinstance(raw_gaps, list) else []
     deleted = sum(1 for r in reviews if r.get("verdict") == "delete")
-    return {"reviews": reviews, "gaps": gaps}, {"kept": len(items) - deleted, "deleted": deleted}
+    summary = {"kept": len(items) - deleted, "deleted": deleted}
+    if truncated:
+        summary["truncated"] = True
+    return {"reviews": reviews, "gaps": gaps}, summary
 
 
 def _build_supplement_tasks(deleted: list[dict], gaps: list[str]) -> list[dict]:
@@ -693,11 +746,20 @@ title 的【】前缀要与上面已有用例保持同一套层级路径与粒�
 最终列表里排到哪儿，粒度不一致就会脱离相关功能点。确实是全新功能点时，再按同样规则下钻。"""
 
 
-def _parse_json_object(raw: str) -> dict | None:
-    """从 LLM 输出中解析出一个 JSON 对象（容忍 markdown 代码块包裹）。"""
+def _parse_json_object(raw: str, require_key: str | None = None) -> dict | None:
+    """从 LLM 输出中解析出一个 JSON 对象（容忍 markdown 代码块包裹）。
+
+    require_key：调用方期望的顶层键，给了就只接受含该键的对象。末端的 raw_decode 兜底会
+    从每一个 `{` 起试解，响应被截断（顶层对象未闭合）时极易解出**内层**的某个子对象并
+    当成顶层返回——评审就踩过这个坑：截断后它返回了第一条 verdict 对象，调用方
+    .get("reviews") 拿到空列表，整组判定静默归零、一条都没删。
+    """
+    def usable(obj) -> bool:
+        return isinstance(obj, dict) and (require_key is None or require_key in obj)
+
     try:
         parsed = json.loads(raw)
-        if isinstance(parsed, dict):
+        if usable(parsed):
             return parsed
     except json.JSONDecodeError:
         pass
@@ -705,7 +767,7 @@ def _parse_json_object(raw: str) -> dict | None:
     if m:
         try:
             parsed = json.loads(m.group(1))
-            if isinstance(parsed, dict):
+            if usable(parsed):
                 return parsed
         except json.JSONDecodeError:
             pass
@@ -714,12 +776,36 @@ def _parse_json_object(raw: str) -> dict | None:
     while start != -1:
         try:
             parsed, _ = decoder.raw_decode(raw[start:])
-            if isinstance(parsed, dict):
+            if usable(parsed):
                 return parsed
         except json.JSONDecodeError:
             pass
         start = raw.find("{", start + 1)
     return None
+
+
+def _salvage_reviews(raw: str) -> list[dict]:
+    """从残缺的评审输出里逐个抓完整的判定对象（同 _salvage_truncated_cases 的手法）。
+
+    评审撞满 max_tokens 时顶层 JSON 不闭合，整体解析必然失败，但每条已吐完的判定本身
+    还是合法 JSON，raw_decode 可以从任意位置起解一个对象。判据用 index —— 判定条目的
+    必备字段。这样至少保住截断前已经判完的那部分，而不是整组归零。
+    """
+    decoder = json.JSONDecoder()
+    out: list[dict] = []
+    i = raw.find("{")
+    while i != -1:
+        try:
+            obj, end = decoder.raw_decode(raw[i:])
+        except json.JSONDecodeError:
+            # 当前位置解不出来（比如最后被切断的那条）—— 跳到下一个 `{` 重试。
+            i = raw.find("{", i + 1)
+            continue
+        if isinstance(obj, dict) and "index" in obj:
+            out.append(obj)
+        # 从这个对象结束的位置继续找，跳过内部嵌套避免误抓。
+        i = raw.find("{", i + end)
+    return out
 
 
 def _parse_cases(raw: str) -> list[dict]:
@@ -778,7 +864,7 @@ def _empty_result_reason(raw: str) -> str | None:
     时才判定为空结果（返回非 None），从 gaps / coverage.gaps 提取原因；无法确认则返回 None，
     交回上层继续走截断抢救等后续路径。
     """
-    parsed = _parse_json_object(raw)
+    parsed = _parse_json_object(raw, require_key="cases")
     if not isinstance(parsed, dict) or not isinstance(parsed.get("cases"), list) or parsed["cases"]:
         return None
     gaps = parsed.get("gaps")
