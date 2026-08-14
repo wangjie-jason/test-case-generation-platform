@@ -52,7 +52,9 @@ export type GenerateStreamEvent =
   | { type: 'review_thinking'; index: number; text: string }
   | { type: 'review_chunk'; index: number; text: string }
   // 评审完成：kept/deleted 为该模块保留/删除条数，供卡片小结展示。
-  | { type: 'review_done'; index: number; module: string; kept?: number; deleted?: number; elapsed?: number }
+  // truncated 为真表示该组响应撞满 max_tokens 被截断，只有截断前的判定生效（后端已抢救
+  // 已闭合的部分），小结里要标出来——否则用户会看到卡片流过 delete 但用例仍在。
+  | { type: 'review_done'; index: number; module: string; kept?: number; deleted?: number; truncated?: boolean; elapsed?: number }
   | { type: 'review_failed'; index: number; module: string; elapsed?: number }
   // ── 补充阶段的多 agent 事件：被删场景按模块、遗漏场景单独，各一个补充 agent 并行生成。──
   | { type: 'supplement_start'; index: number; module: string }

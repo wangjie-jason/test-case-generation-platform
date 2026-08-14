@@ -156,6 +156,9 @@ export const useGenerationStore = defineStore('generation', () => {
       // 评审：保留 N 删 M；补充：新增 N 条。据事件字段生成小结。
       if (typeof event.deleted === 'number' || typeof event.kept === 'number') {
         a.summary = `保留 ${event.kept ?? 0} 条，删除 ${event.deleted ?? 0} 条`
+        // 截断时卡片里已经流过若干 delete 判定，但只有截断前解析成功的那部分真正生效，
+        // 不标出来用户会以为全部判定都落地了（"说删了却还在"）。
+        if (event.truncated) a.summary += '（输出被截断，仅部分判定生效）'
       } else if (typeof event.count === 'number') {
         a.summary = `新增 ${event.count} 条`
       } else {

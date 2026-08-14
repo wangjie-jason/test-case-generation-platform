@@ -1,6 +1,6 @@
 # Test Case Generation Platform — 实施计划
 
-> 版本 v2.3 | 更新 2026-08-10 | Token 用量统计（今日/本周/累计 + 阶段拆分 + 批次级）+ CI（GitHub Actions）+ 回归测试 61 项 + 排序对原有用例零改动（路径层也受 is_movable 约束）+ 生成时自动排序（补充用例归位）+ prompt 标题下钻到功能点 + 补充用例可标识 + 导出可选范围 + 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
+> 版本 v2.4 | 更新 2026-08-14 | 评审判定不再静默丢失（截断检测 + 抢救已闭合判定 + 只列待删 + 组内超限均分切块）+ Token 用量统计（今日/本周/累计 + 阶段拆分 + 批次级）+ CI（GitHub Actions）+ 回归测试 61 项 + 排序对原有用例零改动（路径层也受 is_movable 约束）+ 生成时自动排序（补充用例归位）+ prompt 标题下钻到功能点 + 补充用例可标识 + 导出可选范围 + 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
 
 ## 当前状态
 - **架构变更**: Project/Module → KnowledgeBase（知识库为核心，卡片式管理）
@@ -19,7 +19,7 @@
 | 检索           | 中文n-gram关键词 + ChromaDB向量混合检索                                                    | ✓    |
 | 导出           | Excel下载(5列对齐用户模板)，按批次/按结果导出                                              | ✓    |
 | 生成任务       | 后台任务(asyncio)+独立DB会话，SSE事件缓存重放，刷新/切页后断点续看，全局页头「生成中」入口 | ✓    |
-| 评审-删除-补充 | 生成后 LLM 以测试专家身份逐条判定保留/删除，定向补充缺口，不再整批改写                     | ✓    |
+| 评审-删除-补充 | 生成后 LLM 以测试专家身份判定哪些该删（只列待删，未列出即保留），定向补充缺口，不再整批改写。评审按标题【】前两级模块路径分组并行，单个二级模块超 `LLM_REVIEW_BATCH_SIZE` 才均分切块（兜底）；响应撞满 max_tokens 时检测截断并抢救已判完的部分，前端小结标注「仅部分判定生效」 | ✓    |
 | 并行生成       | store 改为多任务 Map，可同时发起多个生成互不阻塞；前端任务列表可切换查看                   | ✓    |
 | 模块并行+分区流式 | 大需求按模块并发生成（并发上限+错峰防限流），模块内真流式，前端按 agent 卡片分区展示各自的流（可多开，完成后换用例列表）；评审/补充也按模块并发 + agent 卡片流式（实时看到保留/删除判断与补充过程） | ✓    |
 | 多人隔离       | localStorage 匿名 client_id，后端 owner_id 过滤 active 任务，不同浏览器互不干扰            | ✓    |
@@ -155,8 +155,8 @@ event: module_done   → {index, module, cases: [...], elapsed}             # �
 event: module_failed → {index, module, elapsed}                           # 该模块失败（跳过，不中断整批），带失败前耗时(秒)
 event: review_start    → {index, module}                                  # 某评审 agent(按模块分组)开始
 event: review_thinking → {index, text}                                    # 该评审 agent 的思考流
-event: review_chunk    → {index, text}                                    # 该评审 agent 的实时评审输出(keep/delete 判断)
-event: review_done     → {index, module, kept, deleted, elapsed}          # 该评审 agent 完成，带保留/删除条数 + 耗时(秒)
+event: review_chunk    → {index, text}                                    # 该评审 agent 的实时评审输出(只列待删条目)
+event: review_done     → {index, module, kept, deleted, truncated?, elapsed} # 该评审 agent 完成，带保留/删除条数 + 耗时(秒)；truncated=输出被截断，仅截断前判定生效
 event: review_failed   → {index, module, elapsed}                         # 该评审 agent 失败（该组默认全部保留）
 event: supplement_start    → {index, module}                              # 某补充 agent(被删模块/遗漏场景)开始
 event: supplement_thinking → {index, text}                                # 该补充 agent 的思考流
