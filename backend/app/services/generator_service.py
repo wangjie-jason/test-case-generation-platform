@@ -573,40 +573,69 @@ async def _parallel_agents(items: list[dict], worker_factory, phase: str):
 
 
 def _group_by_module(cases: list[dict]) -> list[dict]:
-    """按标题【】里的**前两级**模块路径把用例分组，保留每条用例的全局下标（供评审结论
-    映射回整批）。无模块前缀的归入「其它」。
-    返回 [{"module": 名, "items": [(global_idx, case), ...]}]。
+    """按标题【】里的模块路径把用例分组，保留每条用例的全局下标（供评审结论映射回整批）。
+    无模块前缀的归入「其它」。返回 [{"module": 名, "items": [(global_idx, case), ...]}]。
 
-    取两级而非只取顶层：顶层前缀只是【】里 - 之前的第一段，实测 1097 条的批次里「PC」
-    一个模块就独占 629 条，一次性塞进评审 prompt 会撞满 max_tokens，截断后整组判定
-    静默丢失。取两级后最大组降到 107 条，且分组边界跟着内容自己的层级走——顶层分组
-    再按条数切出的 `PC (2/4)` 既看不出在评审什么，边界也全落在二级模块中间，换个
-    PRD（全部功能挂在同一顶层模块下）就完全退化成纯数字切块。
-    判重能力两种分法是平局：实测同二级模块内被切开的疑似重复对与跨二级模块本可判出
-    的对数各 1，净效应为零，故不作为取舍依据。
+    顶层（第 1 级）一律先分组——「评审按模块并行、每模块一张流式卡片」是既有设计，
+    小需求也不该退化成一张名叫「其它」的大卡片。之后**由条数驱动**决定要不要继续下钻：
+    只有超过 LLM_REVIEW_BATCH_SIZE 的组才按下一级路径细分，装得下的组整体保留。
 
-    LLM_REVIEW_BATCH_SIZE 降级为兜底：仅当单个二级模块仍然超限时才按条数均分切块。
-    切块后卡片标题带 (n/N) 后缀，便于在前端区分同一模块的多个评审 agent。
+    深度只是手段、不能写死。曾写死「取前两级」，那是错的——路径有几级取决于该 PRD
+    恰好覆盖几个平台。这批需求含 PC/移动端两个平台，顶层是平台名，取两级刚好
+    （17 组、最大 107 条）；而单平台需求根本不出现平台名、顶层就是功能模块，同样取
+    两级会一路钻到页面/区块级，实测炸成 178 组、其中 121 个 ≤5 条的碎组
+    （`我的任务-分页` 只剩 1 条），并发 5 下要跑 36 波。改为按条数驱动后两种形状都稳：
+    这批 16 组，单平台模拟 15 组，且碎组不再由我们制造。
+
+    路径已无更深一级（或整组同属一个子路径）却仍超限时，最后才按条数均分切块。
     """
-    groups: dict[str, list[tuple[int, dict]]] = {}
+    cap = max(1, settings.LLM_REVIEW_BATCH_SIZE)
+    top: dict[str, list[tuple[int, dict]]] = {}
     for i, c in enumerate(cases):
         path = title_path(c.get("title", ""))
-        key = "-".join(path[:2]) if path else "其它"
-        groups.setdefault(key, []).append((i, c))
-    cap = max(1, settings.LLM_REVIEW_BATCH_SIZE)
+        top.setdefault(path[0] if path else "其它", []).append((i, c))
     out: list[dict] = []
-    for key, items in groups.items():
-        if len(items) <= cap:
-            out.append({"module": key, "items": items})
-            continue
-        # 均分而非按 cap 贪心切：500 条按 cap=200 贪心会切出 200/200/100，最后那块
-        # 明显偏小却同样白占一次调用和一张卡片；先算块数再均分得到 167/167/166。
-        n_chunks = -(-len(items) // cap)
-        size = -(-len(items) // n_chunks)
-        chunks = [items[s:s + size] for s in range(0, len(items), size)]
-        for n, chunk in enumerate(chunks, 1):
-            out.append({"module": f"{key} ({n}/{len(chunks)})", "items": chunk})
+    for name, items in top.items():
+        _split_module_group(name, items, 2, cap, out)
     return out
+
+
+def _split_module_group(name: str, items: list[tuple[int, dict]], depth: int,
+                        cap: int, out: list[dict]) -> None:
+    """把一个模块分组递归拆到不超过 cap 条，结果按序 append 进 out。
+
+    name: 当前分组名。depth: 本层按路径的第几级细分（顶层已分完，故从 2 起）。
+    终止性：每次递归要么把 items 切成 ≥2 份且每份更小，要么保持条数但让分组名严格
+    多一级（受最长路径长度所限），故必然收敛。
+    """
+    if len(items) <= cap:
+        out.append({"module": name, "items": items})
+        return
+    sub: dict[str, list[tuple[int, dict]]] = {}
+    for gi, c in items:
+        path = title_path(c.get("title", ""))
+        # 路径不够深的用例留在当前层自成一组，别硬塞进某个更深的子路径。
+        key = "-".join(path[:depth]) if len(path) >= depth else name
+        sub.setdefault(key, []).append((gi, c))
+    if len(sub) > 1:
+        for k, v in sub.items():
+            _split_module_group(k, v, depth + 1, cap, out)
+        return
+    # 只有一个子节点：沿着这条单链继续下钻，别在这里就退化成条数切块。整组同属一个
+    # 更深的子路径时，下一级往往才是有区分度的那一层——若某顶层 629 条全在同一个二级
+    # 模块下，就地切块会得到 `PC (1/4)` 这种任意边界，正是本次要消灭的东西。
+    only_key = next(iter(sub))
+    if only_key != name:
+        _split_module_group(only_key, items, depth + 1, cap, out)
+        return
+    # 路径确实到底了（key 已等于当前组名，再深也分不出东西），只能按条数兜底切块。
+    # 均分而非按 cap 贪心：500 条按 cap=200 贪心会切出 200/200/100，最后那块明显偏小
+    # 却同样白占一次 LLM 调用和一张卡片；先算块数再均分得到 167/167/166。
+    n_chunks = -(-len(items) // cap)
+    size = -(-len(items) // n_chunks)
+    chunks = [items[s:s + size] for s in range(0, len(items), size)]
+    for n, chunk in enumerate(chunks, 1):
+        out.append({"module": f"{name} ({n}/{len(chunks)})", "items": chunk})
 
 
 async def _review_worker(idx: int, group: dict, emit, system: str,
