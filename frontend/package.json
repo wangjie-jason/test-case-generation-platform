@@ -11,11 +11,9 @@
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.0",
     "axios": "^1.7.0",
-    "echarts": "^5.5.0",
     "element-plus": "^2.9.0",
     "pinia": "^2.2.0",
     "vue": "^3.5.0",
-    "vue-echarts": "^7.0.0",
     "vue-router": "^4.4.0"
   },
   "devDependencies": {

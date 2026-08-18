@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { generationApi, type CaseRecord, type KnowledgeMatches, type GenerateStreamEvent } from '@/api/generation'
+import { generationApi, type KnowledgeMatches, type GenerateStreamEvent } from '@/api/generation'
 import { kbApi } from '@/api/knowledge'
 import type { KnowledgeBase } from '@/types/project'
 import type { GeneratedTestCase } from '@/types/testCase'
@@ -33,7 +33,6 @@ interface TaskState {
   cases: GeneratedTestCase[]
   knowledgeCounts: Record<string, number>
   knowledgeMatches: KnowledgeMatches
-  validationWarnings: any[]
   startedAt: number | null  // 本次生成开始的客户端时间戳(ms)，用于运行中实时计时
   elapsed: number | null    // 本次生成总耗时（秒），complete 事件下发（权威值）
 }
@@ -47,7 +46,7 @@ function newTaskState(taskId: string, title: string): TaskState {
     taskId, title, status: 'running',
     genProgress: '正在准备...', streamText: '', modules: [], agents: [],
     reviewAgents: [], supplementAgents: [],
-    cases: [], knowledgeCounts: {}, knowledgeMatches: {}, validationWarnings: [],
+    cases: [], knowledgeCounts: {}, knowledgeMatches: {},
     startedAt: Date.now(), elapsed: null,
   }) as TaskState
 }
@@ -92,7 +91,6 @@ export const useGenerationStore = defineStore('generation', () => {
   const cases = computed(() => current.value?.cases ?? [])
   const knowledgeCounts = computed(() => current.value?.knowledgeCounts ?? {})
   const knowledgeMatches = computed(() => current.value?.knowledgeMatches ?? {})
-  const validationWarnings = computed(() => current.value?.validationWarnings ?? [])
   const taskTitle = computed(() => current.value?.title ?? '')
   // 当前查看任务的总生成耗时（秒），未完成时为 null（此时改用 taskStartedAt 实时计时）
   const elapsed = computed(() => current.value?.elapsed ?? null)
@@ -113,8 +111,9 @@ export const useGenerationStore = defineStore('generation', () => {
     kbsLoaded = true
   }
 
-  async function fetchHistory() {
-    // 保留兼容占位：老逻辑一次拉全部用例，现在换成通知视图重拉批次汇总。
+  // 通知视图重拉批次汇总。老逻辑在这里一次拉全部用例，现在只 +1 一个 dirty 计数，
+  // 视图 watch 它即可自动刷新，避免 store 反向依赖 batches 的数据结构。
+  function markHistoryDirty() {
     historyDirty.value += 1
   }
 
@@ -133,12 +132,14 @@ export const useGenerationStore = defineStore('generation', () => {
     }
   }
 
-  // 处理评审/补充阶段的多 agent 事件（与生成阶段同构，复用 AgentState）。
-  // prefix 为 'review_' | 'supplement_'，去掉前缀得到 start/thinking/chunk/done/failed。
+  // 处理生成/评审/补充三个阶段的多 agent 事件（三者同构，复用 AgentState）。
+  // prefix 为 'module_' | 'review_' | 'supplement_'，去掉前缀得到 start/thinking/chunk/done/failed。
   // 断线重连会重放事件，按 index 幂等建卡/更新。
   function _handleAgentEvent(list: AgentState[], prefix: string, event: any) {
     const kind = event.type.slice(prefix.length)
     if (kind === 'start') {
+      // 某 agent 开始跑：建卡或激活已有卡（重连重放时可能重复收到，按 index 幂等）。
+      // startedAt 记录客户端开始计时的时刻，运行中据此实时递增显示耗时。
       const a = list.find(x => x.index === event.index)
       if (a) { a.status = 'running'; if (a.startedAt == null) a.startedAt = Date.now() }
       else { list.push({ index: event.index, module: event.module, status: 'running', thinkText: '', streamText: '', cases: [], summary: '', startedAt: Date.now(), elapsed: null }) }
@@ -147,12 +148,16 @@ export const useGenerationStore = defineStore('generation', () => {
     const a = list.find(x => x.index === event.index)
     if (!a) return
     if (kind === 'thinking') {
+      // 该 agent 的思考流：追加到它自己的思考缓冲区，思考阶段展示，避免干等。
       a.thinkText += event.text
     } else if (kind === 'chunk') {
+      // 该 agent 的实时流：追加到它自己的缓冲区，不与其它 agent 交错。
       a.streamText += event.text
     } else if (kind === 'done') {
       a.status = 'done'
       a.elapsed = event.elapsed ?? null
+      // 生成阶段的 done 带 cases：卡片改为展示解析好的用例列表，替代流文本。
+      if (event.cases) a.cases = event.cases
       // 评审：保留 N 删 M；补充：新增 N 条。据事件字段生成小结。
       if (typeof event.deleted === 'number' || typeof event.kept === 'number') {
         a.summary = `保留 ${event.kept ?? 0} 条，删除 ${event.deleted ?? 0} 条`
@@ -181,27 +186,10 @@ export const useGenerationStore = defineStore('generation', () => {
     } else if (event.type === 'modules') {
       // 展示拆分出的模块清单，让用户看到本次生成覆盖了哪些模块。
       t.modules = event.modules || []
-    } else if (event.type === 'module_start') {
-      // 某 agent 开始跑：建卡或激活已有卡（重连重放时可能重复收到，按 index 幂等）。
-      // startedAt 记录客户端开始计时的时刻，运行中据此实时递增显示耗时。
-      const a = t.agents.find(x => x.index === event.index)
-      if (a) { a.status = 'running'; if (a.startedAt == null) a.startedAt = Date.now() }
-      else { t.agents.push({ index: event.index, module: event.module, status: 'running', thinkText: '', streamText: '', cases: [], summary: '', startedAt: Date.now(), elapsed: null }) }
-    } else if (event.type === 'module_thinking') {
-      // 该 agent 的思考流：追加到它自己的思考缓冲区，思考阶段展示，避免干等。
-      const a = t.agents.find(x => x.index === event.index)
-      if (a) a.thinkText += event.text
-    } else if (event.type === 'module_chunk') {
-      // 该 agent 的实时流：追加到它自己的缓冲区，不与其它 agent 交错。
-      const a = t.agents.find(x => x.index === event.index)
-      if (a) a.streamText += event.text
-    } else if (event.type === 'module_done') {
-      // 该 agent 完成：置完成态，卡片改为展示解析好的用例列表，并记录耗时。
-      const a = t.agents.find(x => x.index === event.index)
-      if (a) { a.status = 'done'; a.cases = event.cases || []; a.elapsed = event.elapsed ?? null }
-    } else if (event.type === 'module_failed') {
-      const a = t.agents.find(x => x.index === event.index)
-      if (a) { a.status = 'failed'; a.elapsed = event.elapsed ?? null }
+    } else if (event.type.startsWith('module_')) {
+      // 生成阶段的多 agent 事件，归档到 agents。注意本分支必须排在 'modules' 之后，
+      // 但 'modules' 不含下划线、不会被 startsWith('module_') 命中，两者互不干扰。
+      _handleAgentEvent(t.agents, 'module_', event as any)
     } else if (event.type.startsWith('review_')) {
       // 评审阶段的多 agent 事件，与生成阶段同构，归档到 reviewAgents。
       _handleAgentEvent(t.reviewAgents, 'review_', event as any)
@@ -217,7 +205,6 @@ export const useGenerationStore = defineStore('generation', () => {
       // 重复赋值以兜底断线重连：complete 单独订阅时也能拿到知识信息。
       t.knowledgeCounts = event.knowledge_used || {}
       t.knowledgeMatches = event.knowledge_matches || {}
-      t.validationWarnings = (event.validation_warnings as any[]) || []
       t.elapsed = event.elapsed ?? null
       onComplete()
     } else if (event.type === 'error') {
@@ -239,7 +226,7 @@ export const useGenerationStore = defineStore('generation', () => {
       t.genProgress = ''
       ElMessage.error(`「${t.title}」${e.message}`)
     } finally {
-      fetchHistory()
+      markHistoryDirty()
     }
   }
 
@@ -345,13 +332,11 @@ export const useGenerationStore = defineStore('generation', () => {
     cases,
     knowledgeCounts,
     knowledgeMatches,
-    validationWarnings,
     taskTitle,
     elapsed,
     taskStartedAt,
     historyDirty,
     fetchKbs,
-    fetchHistory,
     parsePrd,
     clarify,
     generate,

@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, computed, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { generationApi, type CaseRecord, type BatchSummary } from '@/api/generation'
+import { generationApi, type BatchSummary } from '@/api/generation'
 import { ElMessage } from 'element-plus'
 import { useGenerationStore } from '@/stores/generation'
 import { UploadFilled, Loading, Close, ArrowRight } from '@element-plus/icons-vue'
+import { priorityTagType } from '@/utils/priority'
+import { saveBlob } from '@/utils/saveBlob'
+import { useBatchList } from '@/composables/useBatchList'
 
 const store = useGenerationStore()
 // 生成状态保存在 store 中，切换页面/tab 后回到本页仍保留实时进度与结果
@@ -65,54 +68,18 @@ const openSupplementAgents = ref<number[]>([])
 
 // 历史记录：先拉批次汇总渲染折叠卡片，点开某批时再懒加载该批全量用例。
 // 老实现是一次拉 /cases（写死 200 上限），大批次会被截断——现在按 batch_id 精确拉。
-const batches = ref<BatchSummary[]>([])
-const batchItems = ref<Record<string, CaseRecord[]>>({})
-const loadingBatch = ref<Record<string, boolean>>({})
-const expandedBatch = ref<Record<string, boolean>>({})
-
-// 加载态最短展示时长（毫秒）：本地请求常在 100ms 内返回，不兜一下就只看到一闪
-const MIN_LOADING_MS = 200
-
-async function fetchBatches() {
-  try {
-    batches.value = await generationApi.listBatches()
-  } catch { ElMessage.error('加载生成历史失败') }
-}
+const {
+  batches, batchItems, loadingBatch, expandedBatch,
+  fetchBatches, toggleBatch, resetCache,
+} = useBatchList('加载生成历史失败')
 
 // 「刷新」按钮：连 items 缓存与展开态一起重置，否则已展开的批次仍显示旧的懒加载结果
 function refreshHistory() {
-  batchItems.value = {}
-  expandedBatch.value = {}
+  resetCache()
   fetchBatches()
 }
 
-async function loadBatchItems(bid: string) {
-  if (batchItems.value[bid] || loadingBatch.value[bid]) return
-  loadingBatch.value[bid] = true
-  // 本地后端往往 100ms 内就返回，骨架一闪而过反而像页面在抖；
-  // 给个最短展示时长，让加载态至少完整出现一次。
-  const startedAt = performance.now()
-  try {
-    const items = await generationApi.listCases(bid)
-    const elapsed = performance.now() - startedAt
-    if (elapsed < MIN_LOADING_MS) {
-      await new Promise(r => setTimeout(r, MIN_LOADING_MS - elapsed))
-    }
-    batchItems.value[bid] = items
-  } catch (e: any) {
-    ElMessage.error(e?.message || '加载批次失败')
-  } finally {
-    loadingBatch.value[bid] = false
-  }
-}
-
 onMounted(() => { store.fetchKbs(); fetchBatches() })
-
-// 批次标题行即折叠头：点一次展开并懒加载（已加载过只切显隐），再点收起。
-function toggleBatch(bid: string) {
-  expandedBatch.value[bid] = !expandedBatch.value[bid]
-  if (expandedBatch.value[bid]) loadBatchItems(bid)
-}
 
 // 生成结束时 store 会把 historyDirty +1，触发这里重拉批次汇总 + 清空 items 缓存，
 // 避免旧的懒加载数据里少了刚生成的一批。
@@ -139,12 +106,8 @@ async function downloadCases() {
   if (!cases.value.length) return
   try {
     const blob = await generationApi.exportCases(cases.value)
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
     const name = batchName.value || new Date().toISOString().slice(0, 10)
-    a.download = `${name}.xlsx`
-    a.click()
-    URL.revokeObjectURL(a.href)
+    saveBlob(blob, `${name}.xlsx`)
   } catch (e: any) { ElMessage.error(e.message) }
 }
 
@@ -217,13 +180,9 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
       return
     }
     const blob = await generationApi.exportCases(picked)
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
     const base = batch.req_text || batch.created_at?.slice(0, 10) || 'test_cases'
     // 文件名带上范围，避免「全部」和「仅通过」两份下载下来同名难分辨。
-    a.download = `${base}${scope === 'approved' ? '_已通过' : ''}.xlsx`
-    a.click()
-    URL.revokeObjectURL(a.href)
+    saveBlob(blob, `${base}${scope === 'approved' ? '_已通过' : ''}.xlsx`)
   } catch (e: any) { ElMessage.error(e.message) }
 }
 </script>
@@ -380,7 +339,7 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
                 <template v-if="a.status === 'done'">
                   <div v-if="!a.cases.length" class="agent-empty">该模块未产出用例</div>
                   <div v-for="(c, ci) in a.cases" :key="ci" class="agent-case">
-                    <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:6px">{{ c.priority }}</el-tag>
+                    <el-tag v-if="c.priority" size="small" :type="priorityTagType(c.priority)" effect="plain" style="margin-right:6px">{{ c.priority }}</el-tag>
                     <strong>{{ c.title }}</strong>
                     <div v-if="c.precondition" class="agent-case-line">前置：{{ c.precondition }}</div>
                     <div v-if="c.steps" class="agent-case-line" style="white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
@@ -465,7 +424,7 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
               <el-collapse-item>
                 <template #title>
                   <span style="font-weight:bold;color:#409EFF">#{{ idx + 1 }}</span>
-                  <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" style="margin:0 8px">{{ c.priority }}</el-tag>
+                  <el-tag v-if="c.priority" size="small" :type="priorityTagType(c.priority)" style="margin:0 8px">{{ c.priority }}</el-tag>
                   <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain" style="margin-right:8px">补充</el-tag>
                   <span>{{ c.title }}</span>
                 </template>
@@ -536,7 +495,7 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
             <!-- 用例列表在批次内部独立滚动（max-height 60vh），批次多时不必整页下滑 -->
             <div v-else class="case-scroll">
               <div v-for="c in b.items" :key="c.id" class="hist-item">
-                <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain" style="margin-right:6px">{{ c.priority }}</el-tag>
+                <el-tag v-if="c.priority" size="small" :type="priorityTagType(c.priority)" effect="plain" style="margin-right:6px">{{ c.priority }}</el-tag>
                 <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain" style="margin-right:6px">补充</el-tag>
                 <strong>{{ c.title }}</strong>
                 <div v-if="c.precondition" style="color:#909399">前置：{{ c.precondition }}</div>

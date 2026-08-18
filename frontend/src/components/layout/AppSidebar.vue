@@ -12,7 +12,7 @@ const items = [
 ]
 const active = computed(() => {
   const p = route.path
-  if (p === '/' || p === '/stats') return '/'
+  if (p === '/') return '/'
   if (p.includes('/knowledge')) return '/knowledge'
   if (p.includes('/generate')) return '/generate'
   if (p.includes('/review')) return '/review'

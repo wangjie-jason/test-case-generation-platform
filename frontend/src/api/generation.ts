@@ -75,7 +75,6 @@ export type GenerateStreamEvent =
       cases: GeneratedTestCase[]
       knowledge_used: Record<string, number>
       knowledge_matches: KnowledgeMatches
-      validation_warnings: unknown[] | null
       elapsed?: number
     }
   | { type: 'error'; message: string }
@@ -207,10 +206,10 @@ export const generationApi = {
     form.append('file', file)
     return client.post<any, ParsedPrd>('/parse-prd', form, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
-  // 传入 batchId 时按批次拉全量用例，无 batchId 时兼容旧调用（最多 200 条概览）。
-  // 历史/审核页应先调 listBatches 拿汇总，再对展开的那一批调 listCases(batchId)。
-  listCases(batchId?: string) {
-    return client.get<any, CaseRecord[]>('/cases', batchId ? { params: { batch_id: batchId } } : undefined)
+  // 按批次拉该批全量用例（无上限）。历史/审核页先调 listBatches 拿汇总，
+  // 再对展开的那一批调 listCases(batchId)。后端 batch_id 必填。
+  listCases(batchId: string) {
+    return client.get<any, CaseRecord[]>('/cases', { params: { batch_id: batchId } })
   },
   // 拉所有批次的汇总（总数/已审核/通过数/需求文本/时间），供历史与审核页折叠态渲染。
   listBatches() { return client.get<any, BatchSummary[]>('/cases/batches') },
@@ -220,7 +219,8 @@ export const generationApi = {
   updateCase(caseId: string, data: { title?: string; priority?: string | null; precondition?: string | null; steps?: string | null; expected_result?: string | null }) {
     return client.patch<any, CaseRecord>(`/cases/${caseId}`, data)
   },
-  // 审核时手动插入用例。传前后两条 case 的 id 作为锚点，服务端算 sort_order 中点。
+  // 审核时手动插入用例。传前后两条 case 的 id 作为锚点，服务端把新用例的 created_at
+  // 取为前后两条 created_at 的中点（列表按 created_at 升序，所以时间戳就是位置）。
   // 首/末尾插入时只传一侧即可；都不传等价于批次末尾追加。
   createCase(data: { batch_id: string; title: string; priority?: string | null; precondition?: string | null; steps?: string | null; expected_result?: string | null; prev_case_id?: string | null; next_case_id?: string | null }) {
     return client.post<any, CaseRecord>('/cases', data)
