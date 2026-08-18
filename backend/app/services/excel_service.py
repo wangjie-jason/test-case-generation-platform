@@ -69,7 +69,9 @@ class ExcelExportService:
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "测试用例"
-        ws.append(["用例标题", "等级", "前置条件", "步骤描述", "预期结果"])
+        # ID 是本地执行结果回传时唯一可靠的匹配键。标题可能被人工改动或重复，
+        # 因此固定放在第一列，用户本地筛掉不通过的行后可直接回传剩余行。
+        ws.append(["用例ID", "用例标题", "等级", "前置条件", "步骤描述", "预期结果"])
         for c in cases:
             steps_str = c.get("steps", "")
             if isinstance(steps_str, list):
@@ -87,6 +89,7 @@ class ExcelExportService:
                     logger.debug("步骤字段不是 JSON 数组，按原始字符串导出")
 
             ws.append([
+                c.get("id", ""),
                 c.get("title", ""),
                 c.get("priority", "P1"),
                 c.get("precondition", ""),

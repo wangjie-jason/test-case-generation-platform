@@ -24,7 +24,9 @@ _END = {"type": "__end__"}
 async def persist_cases(db, cases: list[dict], batch_name: str | None, requirement_text: str) -> str:
     """将生成的用例写入数据库，返回 batch_id。"""
     batch_id = str(_uuid.uuid4())
-    created = []
+    # 同时保留源字典：提交后把数据库生成的用例 ID 回填到 SSE 的 complete
+    # 事件中，确保用户从「生成结果」直接导出的 Excel 也能携带真实 ID。
+    created: list[tuple[dict, TestCase]] = []
     for c in cases:
         # 只落库真正的用例：跳过无标题占位和 error 提示对象（如"模型只思考未输出"），
         # 否则历史里会出现一条 title 为空、展开无内容的脏记录。
@@ -43,10 +45,11 @@ async def persist_cases(db, cases: list[dict], batch_name: str | None, requireme
             origin=c.get("origin"),
         )
         db.add(tc)
-        created.append(tc)
+        created.append((c, tc))
     await db.commit()
     # 生成的用例回灌历史用例向量库，作为后续生成的 few-shot 语料。
-    for tc in created:
+    for source_case, tc in created:
+        source_case["id"] = tc.id
         await IndexingService.index_case(tc)
     return batch_id
 
