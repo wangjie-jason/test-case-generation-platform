@@ -1,5 +1,7 @@
 # Test Case Generation Platform — 实施计划
 
+> 版本 v2.6 | 更新 2026-08-18 | 死代码清理（删 `POST /retrieve`、`GET /cases` 无 `batch_id` 分支、前端 4 个无引用文件与未用的 echarts 依赖、`complete` 事件里没人消费的 `validation_warnings`、`excel_service` 三个未接路由的导入函数、孤儿 schema `KnowledgeBaseUpdate`）+ `generate_stream` 拆分（238 行 → 64 行编排器，模块并行改用通用 `_parallel_agents`，事件契约零变化）+ 修生成失败的**原因到不了用户**（`_generate_one_batch` 提前滤掉了 error 占位，使 `generate_stream` 里取原因那段成了死代码；现在「只吐思考」「模型判定无可测功能点」都会把可行动原因透传到前端）+ 回归测试 61 → 108 项（新增 LLM 输出解析 36 + 生成流水线事件序列 11）
+>
 > 版本 v2.5 | 更新 2026-08-14 | 评审分组改为条数驱动（不写死深度，单平台需求下不再炸成 178 组）+ 评审判定不再静默丢失（截断检测 + 抢救已闭合判定 + 只列待删）+ Token 用量统计（今日/本周/累计 + 阶段拆分 + 批次级）+ CI（GitHub Actions）+ 回归测试 61 项 + 排序对原有用例零改动（路径层也受 is_movable 约束）+ 生成时自动排序（补充用例归位）+ prompt 标题下钻到功能点 + 补充用例可标识 + 导出可选范围 + 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
 
 ## 当前状态
@@ -28,7 +30,7 @@
 | 死代码清理     | 删除无人调用的 POST /generate、/generate/stream、GenerateResponse 及相关非流式函数         | ✓    |
 | 用例编辑       | 审核阶段可微调 title/precondition/steps/expected_result，只改内容不碰 review 状态（保留原 reject_reason 信号），加 `edited` 标记 | ✓    |
 | 用例顺序       | 规则集中在 `app/utils/case_ordering.py`（生成流程与运维脚本共用）：顶层模块按需求切割顺序成块 → 块内按标题层级路径聚合到子功能级 → 同路径段内按正文共同前缀（≥3 字）单向前移聚合到功能点级。生成时自动排好，无需手工干预；**只挪补充用例、原有用例位置一律不动**——路径层（`place_by_path`）与功能点层（`forward_place`）都受 `is_movable` 约束，锁定用例只作被吸附的锚点；路径层的吸附力 `_affinity` 会压低待插用例的后代路径，避免总纲级补充被自己的细则隔开；`scripts/resort_batch.py` 补排历史批次时不传该约束，走全量排序 | ✓    |
-| 测试与 CI      | `backend/tests/` 61 项回归测试（排序 17 + 前缀解析/归位 26 + token 用量采集 18），只装 `pytest` 即可跑：为此把 `_merge_supplements` 等纯字符串函数从 `generator_service` 抽到 `app/utils/case_grouping.py`（后者顶部 import ChromaStore，测试一 import 就连带拉起约 433 MB 的 chromadb），同理把 token 采集逻辑（contextvars 收集器 / usage 解析 / 时间边界）放在 `app/utils/token_usage.py`，落库与聚合留在 `services/usage_service.py`——**采集不依赖 sqlalchemy，测试才能在只装 pytest 的 CI 里 import**（首版把两者写在一个 service 里，CI 直接 `ModuleNotFoundError: sqlalchemy`）。`services/usage_service.py` re-export 采集 API，故调用方无需关心这层拆分。`.github/workflows/ci.yml` 在 push main 与向 main 提 PR 时跑后端 pytest（Py3.10）与前端 `npm ci && npm run build`（Node18，含 vue-tsc 类型检查） | ✓    |
+| 测试与 CI      | `backend/tests/` 108 项回归测试（排序 17 + 前缀解析/归位 26 + token 用量采集 18 + LLM 输出解析 36 + 生成流水线事件序列 11），前四类只装 `pytest` 即可跑：为此把 `_merge_supplements` 等纯字符串函数从 `generator_service` 抽到 `app/utils/case_grouping.py`（后者顶部 import ChromaStore，测试一 import 就连带拉起约 433 MB 的 chromadb），同理把 token 采集逻辑（contextvars 收集器 / usage 解析 / 时间边界）放在 `app/utils/token_usage.py`，落库与聚合留在 `services/usage_service.py`——**采集不依赖 sqlalchemy，测试才能在只装 pytest 的 CI 里 import**（首版把两者写在一个 service 里，CI 直接 `ModuleNotFoundError: sqlalchemy`）。`services/usage_service.py` re-export 采集 API，故调用方无需关心这层拆分。`.github/workflows/ci.yml` 在 push main 与向 main 提 PR 时跑后端 pytest（Py3.10）与前端 `npm ci && npm run build`（Node18，含 vue-tsc 类型检查） | ✓    |
 | 标题粒度约束   | 生成 prompt 硬要求前缀最后一级是功能点、不能停在页面/区块名（给正反例 + 判断标准），补充 prompt 要求复用已有功能点完整前缀；路径自带功能点后字面前缀启发式退化为兜底 | ✓    |
 | 补充用例标识   | 评审后定向补充的用例落库带 `origin='supplement'`，前端在生成结果/历史批次/审核页显示「补充」标签；加列前的历史用例为 NULL、不显示标签（阶段信息已丢失，不反推） | ✓    |
 | 导出范围       | 历史批次「下载 Excel」为 split-button，可选「全部用例 / 仅通过用例」（后者筛 `review.status === 'approved'`，与是否编辑过无关）；生成页用例未入库故不提供该选项 | ✓    |
@@ -71,18 +73,20 @@
 │   ├── requirements.txt
 │   ├── requirements-dev.txt # 测试依赖（仅 pytest，不进生产镜像）
 │   ├── pytest.ini
-│   ├── tests/               # 回归测试：test_case_ordering(17) / test_case_grouping(26)
-│   ├── scripts/             # 运维脚本（手工执行）：delete_batch / backfill_case_priority / reindex_vectors / resort_batch
+│   ├── tests/               # 回归测试 108 个：test_case_ordering / test_case_grouping / test_usage_service
+│   │                        #   / test_llm_parsing / test_generate_stream（后者需 chromadb，importorskip 守卫）
+│   ├── scripts/             # 运维脚本（手工执行）：delete_batch / backfill_case_priority / reindex_vectors / resort_batch / clean_expected_step_no
 │   └── app/
 │       ├── main.py
 │       ├── config.py
 │       ├── database.py
 │       ├── models/          # 10 SQLAlchemy models (UUID pk)
 │       ├── schemas/         # Pydantic request/response
-│       ├── routers/         # FastAPI route handlers
+│       ├── routers/         # FastAPI route handlers（generation / knowledge 两个）
 │       ├── services/        # 12 service modules
 │       ├── vectorstore/     # ChromaDB client
-│       └── utils/
+│       └── utils/           # 纯逻辑（不依赖 sqlalchemy/chromadb，故可在只装 pytest 的 CI 下测试）：
+│                            #   case_grouping / case_ordering / llm_parsing / token_usage / text_utils
 ├── frontend/
 │   ├── Dockerfile
 │   ├── nginx.conf
@@ -91,12 +95,12 @@
 │       ├── main.ts
 │       ├── App.vue
 │       ├── router/          # Vue Router 4
-│       ├── stores/          # 4 Pinia stores
-│       ├── api/             # 7 Axios API modules
+│       ├── stores/          # 2 Pinia stores (generation / knowledge)
+│       ├── api/             # 3 Axios modules (client / generation / knowledge)
 │       ├── types/           # TypeScript interfaces
-│       ├── views/           # 7 page views
-│       ├── components/      # layout/ knowledge/ generation/ review/ stats/ common/
-│       └── utils/
+│       ├── views/           # 5 page views (Generation / Review / Stats / Knowledge / NotFound)
+│       ├── components/      # layout/ knowledge/ （生成与审核页未拆子组件，见 Phase 3/4 注）
+│       └── utils/           # clientId / formatTokens / priority / saveBlob
 ```
 
 ---
@@ -116,7 +120,9 @@
 - `GET /knowledge-bases/{kb_id}/prd-documents`, `POST /knowledge-bases/{kb_id}/prd-documents/upload`, `DELETE /knowledge-bases/{kb_id}/prd-documents/{id}`
 - `GET/POST /knowledge-bases/{kb_id}/defect-records`, `PUT/DELETE /knowledge-bases/{kb_id}/defect-records/{id}`
 - `POST /knowledge-bases/{kb_id}/import-defects`
-- `POST /retrieve` — 请求体为 `{ query: string, kb_ids: string[] }`
+
+> 检索不对外暴露 HTTP 端点：`RetrievalService.retrieve` 由生成流程内部直接调用。
+> （曾有 `POST /retrieve`，前端从未调用，已移除。）
 
 #### 生成
 - `POST /parse-prd` — 上传解析 PRD 文件
@@ -127,7 +133,7 @@
 
 #### 审核
 - `GET /cases/batches` — 所有批次的汇总：`[{batch_id, total, reviewed, approved, req_text, created_at, tokens}]`。历史/审核页首屏用它渲染折叠卡片，避免一次拉全量被截断。`tokens` 为该批 LLM 消耗，用量统计上线前的批次为 `null`（前端不显示）。
-- `GET /cases?batch_id=<uuid>` — 某个批次的全部用例（无上限）。不传 `batch_id` 时兼容旧调用返回最近 200 条概览。
+- `GET /cases?batch_id=<uuid>` — 某个批次的全部用例（无上限）。`batch_id` 必填：前端一律先调 `/cases/batches` 拿汇总，再对展开的那一批拉明细。（早先允许不传、返回最近若干条概览，已无调用方，该分支已移除。）
 - `POST /cases/{id}/review` — 单条审核
 
 #### 导出 & 统计
@@ -164,7 +170,7 @@ event: supplement_chunk    → {index, text}                                # �
 event: supplement_done     → {index, module, count, elapsed}              # 该补充 agent 完成，带新增条数(去重前) + 耗时(秒)
 event: supplement_failed   → {index, module, elapsed}                     # 该补充 agent 失败（该组跳过）
 event: knowledge → {knowledge_used: {...}, knowledge_matches: {...}}    # 检索结束后立即推送，让前端不等生成完成也能显示命中知识
-event: complete  → {cases: [...], knowledge_used: {...}, knowledge_matches: {...}, validation_warnings: [...], elapsed}  # elapsed 为总耗时(秒)
+event: complete  → {cases: [...], knowledge_used: {...}, knowledge_matches: {...}, elapsed}  # elapsed 为总耗时(秒)
 event: error     → {message: "..."}
 ```
 
@@ -218,35 +224,40 @@ event: error     → {message: "..."}
 - `services/llm_service.py` (LLM 同步+SSE流式，httpx.AsyncClient)
 - `services/prompt_service.py` (三层Prompt构造: 系统规则+知识上下文+用户需求)
 - `services/validation_service.py` (字段存在性+状态可达性校验)
-- `services/generator_service.py` (编排器: validate→retrieve→prompt→generate→postprocess)
+- `services/generator_service.py` (编排器：`generate_stream` 串起 检索→生成→校验+评审→补充→排序 五阶段，每阶段一个 async generator，产物走 `_results` 事件回传)
 - `schemas/generation.py` + `routers/generation.py`
 - 后处理: 校验LLM输出的knowledge_refs ID是否真实存在
 
 **前端**:
 - `GenerationView.vue` (双栏: 输入+输出)
-- `RequirementInput.vue` (文本输入) + `PrdUploader.vue` (拖拽上传PRD)
-- `GenerationProgress.vue` (SSE状态展示) + `CaseResultTable.vue`
-- `CaseDetailPanel.vue` + `KnowledgeRefTags.vue` (知识追溯标签)
 - `stores/generation.ts` + `api/generation.ts`
+- 注：原计划把输入/进度/结果表/详情/追溯标签拆成 `RequirementInput.vue`、`PrdUploader.vue`、
+  `GenerationProgress.vue`、`CaseResultTable.vue`、`CaseDetailPanel.vue`、`KnowledgeRefTags.vue`
+  六个子组件，实际全部内联在 `GenerationView.vue` 里（该文件已 650+ 行，拆分仍是待办）。
 
 **验证**: 上传PRD PDF → 知识库有关联数据 → 生成 → 流式进度 → 用例结果含知识引用标签。
 
-### Phase 4: 审核闭环 + 导出 + 统计 (2-3天)
+### Phase 4: 审核闭环 + 导出 + 统计 (已完成 ✓)
 
 **目标**: 完整反馈闭环 —— 审核标注 → 幻觉归因 → 知识缺口建议 → Excel导出 → 统计看板。
 
-**后端**:
-- `schemas/review.py` + `routers/review.py` (逐条+批量审核)
-- `routers/export.py` (Excel导出，兼容模板)
-- `routers/stats.py` + `services/stats_service.py` (可用率/幻觉分布/趋势)
+**后端**（实际未拆分独立 router，全部并入 `routers/generation.py`）:
+- `POST /cases/{case_id}/review` (逐条审核，写 `review_record` 表)
+- `POST /cases/export` + `services/excel_service.py` 的 `ExcelExportService` (Excel导出)
+- `GET /stats/overview` (可用率/幻觉分布/token用量)
+- 注：原计划的 `schemas/review.py`、`routers/review.py`、`routers/export.py`、`routers/stats.py`、
+  `services/stats_service.py` 均未创建；`generation.py` 因此成为杂物路由（拆分仍是待办）。
 
-**前端**:
-- `ReviewView.vue` + `ReviewCard.vue` + `RejectReasonForm.vue` + `BatchReviewBar.vue`
-- `StatsView.vue` + 4个ECharts图表组件
-- `KnowledgeCoverage.vue` (知识缺口建议面板)
-- `stores/review.ts` + `api/review.ts` + `api/export.ts` + `api/stats.ts`
+**前端**（实际未拆分子组件）:
+- `ReviewView.vue` (单页承载批次列表+审核+手动插入用例)
+- `StatsView.vue` (手写 CSS 条形图，**未引入 ECharts**——曾装过 echarts/vue-echarts 但从未使用，已移除)
+- 注：原计划的 `ReviewCard.vue`、`RejectReasonForm.vue`、`BatchReviewBar.vue`、
+  `KnowledgeCoverage.vue`（知识缺口建议面板）均未创建；知识缺口建议目前只体现在
+  生成阶段的评审 gaps → 定向补充用例，没有独立面板。
+- 审核/导出/统计三块都复用 `api/generation.ts`，未建 `stores/review.ts`、`api/review.ts`、
+  `api/export.ts`、`api/stats.ts`。
 
-**验证**: 生成30条 → 审核全部 → 统计可用率83% → 幻觉分布正确 → 导出Excel → 缺口建议出现。
+**验证**: 生成30条 → 审核全部 → 统计可用率83% → 幻觉分布正确 → 导出Excel。
 
 ---
 

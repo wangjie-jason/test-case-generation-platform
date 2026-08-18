@@ -35,6 +35,21 @@ _PROXY_ENV_VARS = (
 )
 
 
+# 「非文本内容」类型的占位符：飞书文档里嵌的画板 / 附件 / 各种嵌入组件都没有可提取的
+# 文本正文，静默丢掉会导致读者看不出"这里其实有内容"。给出明确占位符，方便读者感知，
+# 也避免相邻段落被合并、错位。
+_NON_TEXT_PLACEHOLDERS = {
+    21: "[画板]",       # Diagram / Board — 飞书自带画板画的架构图/流程图
+    23: "[附件]",       # File — 拖进来的 PDF/图片/其它附件
+    26: "[嵌入内容]",   # Iframe — drawio / ProcessOn / 视频等
+    28: "[第三方组件]", # ISV — 企业微信 / SaaS 挂件
+    29: "[思维导图]",   # Mindnote
+    30: "[电子表格]",   # 内嵌 Sheet
+    18: "[多维表格]",   # 内嵌 Bitable
+    43: "[日历引用]",   # MentionCalendar — 内嵌日历事件/日程/日期
+}
+
+
 def _new_httpx_client(timeout: float = 30.0) -> httpx.AsyncClient:
     """构造一个绕开系统代理变量的 httpx 客户端。"""
     saved = {k: os.environ.pop(k, None) for k in _PROXY_ENV_VARS}
@@ -275,19 +290,6 @@ def blocks_to_markdown(blocks: list[dict]) -> str:
             except Exception:
                 logger.exception("解析飞书图片 caption 失败，退化为 [图片]")
                 return "[图片]"
-        # 其他"非文本内容"类型的占位符：飞书文档里嵌的画板 / 附件 / 各种嵌入组件都没有可提取的
-        # 文本正文，静默丢掉会导致读者看不出"这里其实有内容"。给出明确占位符，方便读者感知，
-        # 也避免相邻段落被合并、错位。
-        _NON_TEXT_PLACEHOLDERS = {
-            21: "[画板]",       # Diagram / Board — 飞书自带画板画的架构图/流程图（本次触发的场景）
-            23: "[附件]",       # File — 拖进来的 PDF/图片/其它附件
-            26: "[嵌入内容]",   # Iframe — drawio / ProcessOn / 视频等
-            28: "[第三方组件]", # ISV — 企业微信 / SaaS 挂件
-            29: "[思维导图]",   # Mindnote
-            30: "[电子表格]",   # 内嵌 Sheet
-            18: "[多维表格]",   # 内嵌 Bitable
-            43: "[日历引用]",   # MentionCalendar — 内嵌日历事件/日程/日期
-        }
         if t in _NON_TEXT_PLACEHOLDERS:
             return _NON_TEXT_PLACEHOLDERS[t]
         # 未识别的类型：如果它没有子块就输出通用占位符，方便读者一眼看到"这里被漏掉了"；

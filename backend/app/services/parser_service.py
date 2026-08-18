@@ -5,7 +5,6 @@ from io import BytesIO
 import httpx
 import pdfplumber
 from docx import Document as DocxDocument
-from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
 from app.config import settings
 

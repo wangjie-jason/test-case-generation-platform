@@ -1,12 +1,29 @@
-import uuid as _uuid
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.knowledge_base import KnowledgeBase
-from app.schemas.knowledge import *
-from app.schemas.project import KnowledgeBaseCreate, KnowledgeBaseResponse, KnowledgeBaseUpdate
+from app.schemas.knowledge import (
+    BusinessRuleCreate,
+    BusinessRuleResponse,
+    BusinessRuleUpdate,
+    DefectRecordCreate,
+    DefectRecordResponse,
+    DefectRecordUpdate,
+    FeishuImportRequest,
+    FieldDictCreate,
+    FieldDictResponse,
+    FieldDictUpdate,
+    PrdDocumentResponse,
+    StateMachineCreate,
+    StateMachineResponse,
+    StateMachineUpdate,
+    TermMappingCreate,
+    TermMappingResponse,
+    TermMappingUpdate,
+)
+from app.schemas.project import KnowledgeBaseCreate, KnowledgeBaseResponse
 from app.services.knowledge_service import KnowledgeService
 from app.services.parser_service import ParserService
 from app.services.excel_service import ExcelImportService
@@ -26,23 +43,8 @@ async def create_kb(data: KnowledgeBaseCreate, db: AsyncSession = Depends(get_db
 
 @router.get("/knowledge-bases", response_model=list[KnowledgeBaseResponse])
 async def list_kbs(db: AsyncSession = Depends(get_db)):
-    from sqlalchemy import select
     r = await db.execute(select(KnowledgeBase).order_by(KnowledgeBase.created_at.desc()))
     return r.scalars().all()
-
-@router.get("/knowledge-bases/{kb_id}", response_model=KnowledgeBaseResponse)
-async def get_kb(kb_id: str, db: AsyncSession = Depends(get_db)):
-    kb = await db.get(KnowledgeBase, kb_id)
-    if not kb: raise HTTPException(404, "知识库不存在")
-    return kb
-
-@router.put("/knowledge-bases/{kb_id}", response_model=KnowledgeBaseResponse)
-async def update_kb(kb_id: str, data: KnowledgeBaseUpdate, db: AsyncSession = Depends(get_db)):
-    kb = await db.get(KnowledgeBase, kb_id)
-    if not kb: raise HTTPException(404, "知识库不存在")
-    for k, v in data.model_dump(exclude_unset=True).items():
-        setattr(kb, k, v)
-    await db.commit(); await db.refresh(kb); return kb
 
 @router.delete("/knowledge-bases/{kb_id}")
 async def delete_kb(kb_id: str, db: AsyncSession = Depends(get_db)):
@@ -158,16 +160,3 @@ async def import_defects(kb_id: str, file: UploadFile = File(...), db: AsyncSess
     for rec in created:
         await IndexingService.index_defect(rec)
     return {"imported": len(created)}
-
-# ── 检索 ──
-
-from pydantic import BaseModel, Field
-
-class RetrieveRequest(BaseModel):
-    query: str
-    kb_ids: list[str] = Field(default_factory=list)
-
-@router.post("/retrieve")
-async def retrieve_knowledge(body: RetrieveRequest, db: AsyncSession = Depends(get_db)):
-    from app.services.retrieval_service import RetrievalService
-    return await RetrievalService.retrieve(db, body.query, kb_ids=body.kb_ids if body.kb_ids else None)

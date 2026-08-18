@@ -1,5 +1,6 @@
-import asyncio
 import json
+from datetime import datetime, timedelta
+from io import BytesIO
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -7,9 +8,11 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, now_local
+from app.models.review_record import ReviewRecord
 from app.models.test_case import TestCase
 from app.schemas.generation import GenerateRequest
 from app.services import usage_service
+from app.services.excel_service import ExcelExportService
 from app.services.generator_service import GeneratorService
 from app.services.llm_service import LLMServiceError
 from app.services.parser_service import ParserService
@@ -18,6 +21,57 @@ from app.services.task_service import TaskManager
 router = APIRouter()
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+def _case_payload(tc: TestCase, review: dict | None) -> dict:
+    """用例的统一响应体。列表/编辑/新增三个接口共用，避免字段集漂移——
+    早先三处各自手写 dict，create_case 漏了 origin，前端「补充」标签靠巧合才没出错。"""
+    return {
+        "id": tc.id,
+        "title": tc.title,
+        "priority": tc.priority,
+        "precondition": tc.precondition,
+        "expected_result": tc.expected_result,
+        "steps": tc.steps,
+        "source": tc.source,
+        "origin": tc.origin,
+        "batch_id": tc.batch_id,
+        "req_text": tc.req_text,
+        "created_at": str(tc.created_at),
+        "edited": bool(tc.edited),
+        "edited_at": str(tc.edited_at) if tc.edited_at else None,
+        "review": review,
+    }
+
+
+async def _resolve_insert_ts(db: AsyncSession, batch_id: str,
+                             prev_id: str | None, next_id: str | None) -> datetime:
+    """算手动插入用例的 created_at——列表按 created_at 升序展示，所以时间戳就是位置。
+    - 传了 prev/next：取两者中点
+    - 只传 prev（末尾追加）：prev + 1 秒
+    - 只传 next（开头插入）：next - 1 秒
+    - 都不传：当前时间（等价于末尾追加）
+    锚点不属于本批次时忽略该锚点，避免跨批次插错位置。
+    多次插入同位置时中点会逐渐收敛到同一微秒，SQLite 此时按 rowid 插入顺序返回，
+    额外插入的几条天然排在一起，不影响业务。"""
+    prev_ts: datetime | None = None
+    next_ts: datetime | None = None
+    if prev_id:
+        prev_case = await db.get(TestCase, prev_id)
+        if prev_case and prev_case.batch_id == batch_id:
+            prev_ts = prev_case.created_at
+    if next_id:
+        next_case = await db.get(TestCase, next_id)
+        if next_case and next_case.batch_id == batch_id:
+            next_ts = next_case.created_at
+
+    if prev_ts is not None and next_ts is not None:
+        return prev_ts + (next_ts - prev_ts) / 2
+    if prev_ts is not None:
+        return prev_ts + timedelta(seconds=1)
+    if next_ts is not None:
+        return next_ts - timedelta(seconds=1)
+    return now_local()
 
 
 @router.post("/generate/clarify")
@@ -96,7 +150,6 @@ async def list_batches(db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(stmt)).all()
 
     # 每批的审核进度：一次 GROUP BY 出 approved / total_reviewed，避免 N+1。
-    from app.models.review_record import ReviewRecord
     review_stmt = (
         select(
             TestCase.batch_id,
@@ -129,37 +182,31 @@ async def list_batches(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/cases")
-async def list_cases(batch_id: str | None = None, db: AsyncSession = Depends(get_db)):
-    """列出用例。传入 batch_id 时只返回该批次全部用例（无上限，一次拉完），
-    不传时兼容旧调用：返回最近 5000 条概览——旧调用只做统计头，不会踩到批次截断问题，
-    新的历史/审核页请改走 /cases/batches + /cases?batch_id=xxx。"""
-    from app.models.review_record import ReviewRecord
-    if batch_id:
-        # 批次详情按 case 生成顺序展示（LLM 逐条产出的自然顺序），与"生成结果"页一致。
-        # 同一批 case 是在 persist_cases 里几乎同时写入的，用 created_at ASC 就等于生成顺序。
-        # 手动插入的 case 通过 created_at = 前后两条中点，自然排到目标位置。
-        stmt = select(TestCase).where(TestCase.batch_id == batch_id).order_by(TestCase.created_at.asc())
-    else:
-        # 无 batch_id 走概览路径：最近的批次在前，方便统计头/旧调用取样。
-        stmt = select(TestCase).order_by(TestCase.created_at.desc()).limit(5000)
+async def list_cases(batch_id: str, db: AsyncSession = Depends(get_db)):
+    """列出某批次的全部用例（无上限，一次拉完）。batch_id 必填——
+    历史/审核页先调 /cases/batches 拿汇总，再对展开的那一批调本接口拉明细。
+    早先允许不传 batch_id 返回最近 5000 条概览，前端已全部改走批次维度，该分支已移除。"""
+    # 批次详情按 case 生成顺序展示（LLM 逐条产出的自然顺序），与"生成结果"页一致。
+    # 同一批 case 是在 persist_cases 里几乎同时写入的，用 created_at ASC 就等于生成顺序。
+    # 手动插入的 case 通过 created_at = 前后两条中点，自然排到目标位置。
+    stmt = select(TestCase).where(TestCase.batch_id == batch_id).order_by(TestCase.created_at.asc())
     cases = (await db.execute(stmt)).scalars().all()
     case_ids = [c.id for c in cases]
     review_map = {}
     if case_ids:
         rr = await db.execute(select(ReviewRecord).where(ReviewRecord.case_id.in_(case_ids)))
         for rec in rr.scalars().all(): review_map[rec.case_id] = {"status": rec.status, "reject_reason": rec.reject_reason}
-    return [{"id": c.id, "title": c.title, "priority": c.priority, "precondition": c.precondition, "expected_result": c.expected_result, "steps": c.steps, "source": c.source, "origin": c.origin, "batch_id": c.batch_id, "req_text": c.req_text, "created_at": str(c.created_at), "edited": bool(c.edited), "edited_at": str(c.edited_at) if c.edited_at else None, "review": review_map.get(c.id)} for c in cases]
+    return [_case_payload(c, review_map.get(c.id)) for c in cases]
 
 
 @router.patch("/cases/{case_id}")
 async def update_case(case_id: str, data: dict, db: AsyncSession = Depends(get_db)):
-    """审核阶段的人工微调：允许改 title/precondition/steps/expected_result 四字段。
+    """审核阶段的人工微调：允许改 title/priority/precondition/steps/expected_result 五字段。
     编辑只改用例内容 + 打 edited 标记，不碰 review 记录。
     好处：
     - 原始 reject_reason（如 context_missing）保留不丢，AI 训练信号完整
     - 已 reject 的 case 编辑后内容已补全，前端可据此让它出现在导出中
     - 已 approve 的 case 编辑后仍是 approved，只是多一个「已编辑」标记"""
-    from app.models.review_record import ReviewRecord
     tc = await db.get(TestCase, case_id)
     if not tc:
         raise HTTPException(404, "用例不存在")
@@ -189,27 +236,14 @@ async def update_case(case_id: str, data: dict, db: AsyncSession = Depends(get_d
     review_info = {"status": rec.status, "reject_reason": rec.reject_reason} if rec else None
 
     await db.commit()
-    return {
-        "id": tc.id, "title": tc.title, "priority": tc.priority, "precondition": tc.precondition,
-        "steps": tc.steps, "expected_result": tc.expected_result,
-        "edited": bool(tc.edited), "edited_at": str(tc.edited_at) if tc.edited_at else None,
-        "review": review_info,
-    }
+    return _case_payload(tc, review_info)
 
 
 @router.post("/cases")
 async def create_case(data: dict, db: AsyncSession = Depends(get_db)):
-    """审核时手动插入用例。前端传 batch_id + 四字段 + 可选 prev_case_id/next_case_id 锚点。
-    定位策略：新 case 的 created_at = 前后两条 created_at 的中点，自然排到目标位置。
-    - 传了 prev/next：中点
-    - 只传 prev（末尾追加）：prev.created_at + 1 秒
-    - 只传 next（开头插入）：next.created_at - 1 秒
-    - 都不传：取当前时间（等价于末尾追加）
-    多次插入同位置时 created_at 会逐渐收敛到同一微秒，SQLite 此时按 rowid 插入顺序返回，
-    额外插入的几条天然排在一起，不影响业务。
+    """审核时手动插入用例。前端传 batch_id + 内容字段 + 可选 prev_case_id/next_case_id 锚点。
+    定位策略见 _resolve_insert_ts：新 case 的 created_at 落在前后两条之间，自然排到目标位置。
     手动插入的 case source='manual'、edited=True、review 直接置 approved。"""
-    from app.models.review_record import ReviewRecord
-
     batch_id = data.get("batch_id")
     if not batch_id:
         raise HTTPException(400, "batch_id 必填")
@@ -217,29 +251,7 @@ async def create_case(data: dict, db: AsyncSession = Depends(get_db)):
     if not title:
         raise HTTPException(400, "title 必填")
 
-    from datetime import timedelta
-
-    prev_id = data.get("prev_case_id")
-    next_id = data.get("next_case_id")
-    prev_ts: datetime | None = None
-    next_ts: datetime | None = None
-    if prev_id:
-        prev_case = await db.get(TestCase, prev_id)
-        if prev_case and prev_case.batch_id == batch_id:
-            prev_ts = prev_case.created_at
-    if next_id:
-        next_case = await db.get(TestCase, next_id)
-        if next_case and next_case.batch_id == batch_id:
-            next_ts = next_case.created_at
-
-    if prev_ts is not None and next_ts is not None:
-        new_ts = prev_ts + (next_ts - prev_ts) / 2
-    elif prev_ts is not None:
-        new_ts = prev_ts + timedelta(seconds=1)
-    elif next_ts is not None:
-        new_ts = next_ts - timedelta(seconds=1)
-    else:
-        new_ts = now_local()
+    new_ts = await _resolve_insert_ts(db, batch_id, data.get("prev_case_id"), data.get("next_case_id"))
 
     # 拿该批任一条 case 抄 req_text，保持批次上下文一致（生成时都是同一个需求）
     batch_ref = (await db.execute(select(TestCase).where(TestCase.batch_id == batch_id).limit(1))).scalar_one_or_none()
@@ -270,20 +282,11 @@ async def create_case(data: dict, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(new_case)
 
-    return {
-        "id": new_case.id, "title": new_case.title, "priority": new_case.priority, "precondition": new_case.precondition,
-        "expected_result": new_case.expected_result, "steps": new_case.steps,
-        "source": new_case.source, "batch_id": new_case.batch_id, "req_text": new_case.req_text,
-        "created_at": str(new_case.created_at),
-        "edited": bool(new_case.edited),
-        "edited_at": str(new_case.edited_at) if new_case.edited_at else None,
-        "review": {"status": "approved", "reject_reason": None},
-    }
+    return _case_payload(new_case, {"status": "approved", "reject_reason": None})
 
 
 @router.post("/cases/{case_id}/review")
 async def review_case(case_id: str, data: dict, db: AsyncSession = Depends(get_db)):
-    from app.models.review_record import ReviewRecord
     tc = await db.get(TestCase, case_id)
     if not tc: raise HTTPException(404, "用例不存在")
     status = data.get("status")
@@ -299,8 +302,6 @@ async def review_case(case_id: str, data: dict, db: AsyncSession = Depends(get_d
 
 @router.post("/cases/export")
 async def export_cases(data: dict):
-    from io import BytesIO
-    from app.services.excel_service import ExcelExportService
     excel_bytes = ExcelExportService.export_test_cases(data.get("cases", []))
     return StreamingResponse(BytesIO(excel_bytes.getvalue()), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=test_cases.xlsx"})
 
@@ -316,7 +317,6 @@ async def parse_prd(file: UploadFile = File(...)):
 
 @router.get("/stats/overview")
 async def stats_overview(db: AsyncSession = Depends(get_db)):
-    from app.models.review_record import ReviewRecord
     total = (await db.execute(select(TestCase))).scalars().all()
     total_n = len(total)
     # 批次数按 batch_id 去重，不能复用 total_n——那是用例条数，两者语义不同。

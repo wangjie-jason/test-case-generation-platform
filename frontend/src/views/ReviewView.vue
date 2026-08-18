@@ -2,18 +2,16 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ArrowRight } from '@element-plus/icons-vue'
-import { generationApi, type CaseRecord, type BatchSummary } from '@/api/generation'
+import { generationApi, type CaseRecord } from '@/api/generation'
 import { formatTokens } from '@/utils/formatTokens'
+import { priorityTagType } from '@/utils/priority'
+import { useBatchList } from '@/composables/useBatchList'
 
-const batches = ref<BatchSummary[]>([])
-const batchItems = ref<Record<string, CaseRecord[]>>({})
-const loadingBatch = ref<Record<string, boolean>>({})
-const expandedBatch = ref<Record<string, boolean>>({})
-const loading = ref(false)
+const {
+  batches, batchItems, loadingBatch, expandedBatch, loading,
+  fetchBatches, toggleBatch,
+} = useBatchList()
 const filterTab = ref<'all' | 'pending' | 'approved' | 'rejected'>('all')
-
-// 加载态最短展示时长（毫秒）：本地请求常在 100ms 内返回，不兜一下就只看到一闪
-const MIN_LOADING_MS = 200
 
 const rejectReasons = [
   { value: 'field_hallucination', label: '字段幻觉' },
@@ -55,40 +53,7 @@ const totalReviewed = computed(() => batches.value.reduce((s, b) => s + b.review
 const totalApproved = computed(() => batches.value.reduce((s, b) => s + b.approved, 0))
 const usabilityRate = computed(() => totalReviewed.value > 0 ? Math.round((totalApproved.value / totalReviewed.value) * 100) : 0)
 
-async function fetchBatches() {
-  loading.value = true
-  try { batches.value = await generationApi.listBatches() }
-  catch { ElMessage.error('加载失败') }
-  finally { loading.value = false }
-}
-
-async function loadBatchItems(bid: string) {
-  if (batchItems.value[bid] || loadingBatch.value[bid]) return
-  loadingBatch.value[bid] = true
-  // 本地后端往往 100ms 内就返回，骨架一闪而过反而像页面在抖；
-  // 给个最短展示时长，让加载态至少完整出现一次。
-  const startedAt = performance.now()
-  try {
-    const items = await generationApi.listCases(bid)
-    const elapsed = performance.now() - startedAt
-    if (elapsed < MIN_LOADING_MS) {
-      await new Promise(r => setTimeout(r, MIN_LOADING_MS - elapsed))
-    }
-    batchItems.value[bid] = items
-  } catch (e: any) {
-    ElMessage.error(e?.message || '加载批次失败')
-  } finally {
-    loadingBatch.value[bid] = false
-  }
-}
-
 onMounted(fetchBatches)
-
-// 次级折叠面板：点一次展开并懒加载（已加载过就只切显隐），再点收起。
-function toggleBatch(bid: string) {
-  expandedBatch.value[bid] = !expandedBatch.value[bid]
-  if (expandedBatch.value[bid]) loadBatchItems(bid)
-}
 
 // 全角开括号（【（「等）的墨迹在字框内偏右，盒子左边界虽与「前置：」对齐，
 // 视觉上却像缩进了几像素。对这类开头的标题补一点负偏移抵掉。
@@ -216,7 +181,8 @@ async function saveEdit() {
 
 // —— 手动插入用例弹窗 ——
 // 场景：AI 漏了整个模块/功能，用户想在两条 case 之间补一条。
-// 后端用 sort_order 中点定位，前端只负责传前后两条 case 的 id 作为锚点。
+// 后端把新用例的 created_at 取为前后两条 created_at 的中点（列表按 created_at 升序，
+// 所以时间戳就是位置），前端只负责传前后两条 case 的 id 作为锚点。
 // 保存后新 case 直接插入到列表对应位置，batch 汇总的 total/reviewed/approved 各 +1
 // （手动插入的默认 approved，无需再审）。
 const insertDialogVisible = ref(false)
@@ -373,7 +339,7 @@ async function saveInsert() {
                 <span class="ri-title" :class="{ hang: hangsPunctuation(c.title) }">{{ c.title }}</span>
                 <!-- 间距一律交给 .ri-header 的 gap，标签/按钮上不再挂内联 margin，
                      否则两套间距叠加，每个缝隙宽度都不一样 -->
-                <el-tag v-if="c.priority" size="small" :type="c.priority === 'P0' ? 'danger' : c.priority === 'P1' ? 'warning' : 'info'" effect="plain">{{ c.priority }}</el-tag>
+                <el-tag v-if="c.priority" size="small" :type="priorityTagType(c.priority)" effect="plain">{{ c.priority }}</el-tag>
                 <el-tag v-if="c.edited" size="small" type="warning" effect="plain">已编辑</el-tag>
                 <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain">补充</el-tag>
                 <el-tag v-if="c.source === 'manual'" size="small" type="info" effect="plain">手动</el-tag>

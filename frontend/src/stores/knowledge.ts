@@ -6,7 +6,6 @@ import type { KnowledgeBase } from '@/types/project'
 
 export const useKnowledgeStore = defineStore('knowledge', () => {
   const kbs = ref<KnowledgeBase[]>([])
-  const currentKb = ref<KnowledgeBase | null>(null)
   const fieldDicts = ref<FieldDict[]>([]); const businessRules = ref<BusinessRule[]>([])
   const stateMachines = ref<StateMachine[]>([]); const termMappings = ref<TermMapping[]>([])
   const prdDocuments = ref<PrdDocument[]>([]); const defectRecords = ref<DefectRecord[]>([])
@@ -15,7 +14,6 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
   async function fetchKbs() { kbs.value = await kbApi.list() }
   async function createKb(data: { name: string; description?: string }) { const kb = await kbApi.create(data); kbs.value.push(kb); return kb }
   async function deleteKb(id: string) { await kbApi.delete(id); kbs.value = kbs.value.filter(k => k.id !== id) }
-  function selectKb(kb: KnowledgeBase | null) { currentKb.value = kb }
 
   function clearDetails() {
     fieldDicts.value = []; businessRules.value = []
@@ -37,8 +35,8 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
   }
 
   return {
-    kbs, currentKb, fieldDicts, businessRules, stateMachines, termMappings, prdDocuments, defectRecords, loadingDetails,
-    fetchKbs, createKb, deleteKb, selectKb, clearDetails, _fetch,
+    kbs, fieldDicts, businessRules, stateMachines, termMappings, prdDocuments, defectRecords, loadingDetails,
+    fetchKbs, createKb, deleteKb, clearDetails, _fetch,
     createFieldDict: (kbId: string, d: Partial<FieldDict>) => fieldDictApi.create(kbId, d).then(() => _fetch(kbId)),
     updateFieldDict: (kbId: string, id: string, d: Partial<FieldDict>) => fieldDictApi.update(kbId, id, d).then(() => _fetch(kbId)),
     deleteFieldDict: (kbId: string, id: string) => fieldDictApi.delete(kbId, id).then(() => _fetch(kbId)),

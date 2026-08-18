@@ -21,6 +21,9 @@ export default defineConfig({
     }),
   ],
   server: {
+    // 监听 0.0.0.0 而非默认的 localhost，同局域网的同事可用 http://<本机内网IP>:3000 访问。
+    // 后端无需跟着放开——请求都走下面的代理，由本机去连 127.0.0.1:8000。
+    host: true,
     port: 3000,
     proxy: {
       '/api': {
