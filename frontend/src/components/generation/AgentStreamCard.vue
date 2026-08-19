@@ -1,31 +1,26 @@
 <script setup lang="ts">
 import { Loading } from '@element-plus/icons-vue'
 import { priorityTagType } from '@/utils/priority'
+import { renderSteps } from '@/utils/renderSteps'
+import type { AgentState } from '@/stores/generation'
 
-// 故意用宽松类型：上游 store 给的 AgentState 已经规范了字段，这里只需要"形似"。
-// 强类型校验放到 store / 接口契约那一层，UI 组件不重复声明。
-interface AgentItem {
-  index: number
-  module: string
-  status: 'running' | 'done' | 'failed'
-  streamText?: string
-  thinkText?: string
-  cases?: any[]
-  summary?: string
+withDefaults(defineProps<{
+  agent: AgentState
+  /** 运行中的 meta 文案：生成「生成中…」、评审「评审中…」、补充「补充中…」。 */
+  runningMessage?: string
+  /** 失败时展开区里的解释文案。折叠头 meta 固定显示「失败」，长文案不挤掉模块名。 */
   failedMessage?: string
+  /** 完成但一条用例都没产出时的占位文案（仅 showCasesAsList 生效）。 */
   emptyMessage?: string
+  /** 生成阶段：完成后把流式文本换成解析好的用例列表，meta 显示「N 条」。
+   *  评审 / 补充阶段为 false：完成后仍展示流文本，meta 显示 agent.summary。 */
   showCasesAsList?: boolean
-}
-
-defineProps<{
-  agent: AgentItem
-}>()
-
-function renderSteps(steps: unknown): string {
-  if (typeof steps === 'string') return steps
-  if (Array.isArray(steps)) return JSON.stringify(steps)
-  return ''
-}
+}>(), {
+  runningMessage: '生成中…',
+  failedMessage: '该模块生成失败，已跳过（其余模块不受影响）',
+  emptyMessage: '该模块未产出用例',
+  showCasesAsList: false,
+})
 </script>
 
 <template>
@@ -36,15 +31,16 @@ function renderSteps(steps: unknown): string {
       <span v-else class="agent-ico failed">✕</span>
       <span class="agent-name">{{ agent.module }}</span>
       <span class="agent-meta">
-        <template v-if="agent.status === 'running'">生成中…</template>
-        <template v-else-if="agent.status === 'failed'">{{ agent.failedMessage || '失败' }}</template>
-        <template v-else>{{ agent.summary || `${agent.cases?.length || 0} 条` }}</template>
+        <template v-if="agent.status === 'running'">{{ runningMessage }}</template>
+        <template v-else-if="agent.status === 'failed'">失败</template>
+        <template v-else-if="showCasesAsList">{{ agent.cases.length }} 条</template>
+        <template v-else>{{ agent.summary }}</template>
         <slot name="time" />
       </span>
     </template>
     <!-- 完成：可选展示解析好的用例列表（生成阶段用） -->
-    <template v-if="agent.status === 'done' && agent.showCasesAsList">
-      <div v-if="!agent.cases?.length" class="agent-empty">{{ agent.emptyMessage || '该模块未产出用例' }}</div>
+    <template v-if="agent.status === 'done' && showCasesAsList">
+      <div v-if="!agent.cases.length" class="agent-empty">{{ emptyMessage }}</div>
       <div v-for="(c, ci) in agent.cases" :key="ci" class="agent-case">
         <el-tag v-if="c.priority" size="small" :type="priorityTagType(c.priority)" effect="plain" style="margin-right:6px">{{ c.priority }}</el-tag>
         <strong>{{ c.title }}</strong>
@@ -54,7 +50,7 @@ function renderSteps(steps: unknown): string {
       </div>
     </template>
     <!-- 失败 -->
-    <div v-else-if="agent.status === 'failed'" class="agent-empty">{{ agent.failedMessage || '该模块生成失败，已跳过（其余模块不受影响）' }}</div>
+    <div v-else-if="agent.status === 'failed'" class="agent-empty">{{ failedMessage }}</div>
     <!-- 生成中 / 评审 / 补充：流式展示 -->
     <template v-else>
       <div v-if="agent.streamText" class="stream-output">{{ agent.streamText }}</div>

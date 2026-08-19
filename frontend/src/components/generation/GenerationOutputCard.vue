@@ -1,24 +1,37 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, toRef } from 'vue'
 import AgentStreamCard from './AgentStreamCard.vue'
 import { priorityTagType } from '@/utils/priority'
+import { renderSteps } from '@/utils/renderSteps'
+import { useDurationTimer } from '@/composables/useDurationTimer'
+import type { AgentState } from '@/stores/generation'
+import type { GeneratedTestCase } from '@/types/testCase'
 
-defineProps<{
+const props = defineProps<{
   isGenerating: boolean
   genProgress: string
   modules: string[]
-  agents: any[]   // AgentState from store; 形态与 AgentStreamCard 一致，故意不重复声明
-  reviewAgents: any[]
-  supplementAgents: any[]
+  agents: AgentState[]
+  reviewAgents: AgentState[]
+  supplementAgents: AgentState[]
   streamText: string
-  cases: any[]     // GeneratedTestCase[] with optional origin
-  totalSeconds: number | null
-  hasCases: boolean
+  cases: GeneratedTestCase[]
   knowledgeSummary: string
-  formatDuration: (sec: number | null | undefined) => string
-  agentSeconds: (a: any) => number | null
-  downloadCases: () => void
+  // 秒表所需的时间基准：本组件是「运行时长」的唯一消费者，故计时器放在这里，
+  // 不再由父组件把 formatDuration / agentSeconds 当函数 prop 传下来。
+  runningCount: number
+  taskStartedAt: number | null
+  elapsed: number | null
 }>()
+
+defineEmits<{ (e: 'download'): void }>()
+
+const { formatDuration, agentSeconds, totalSeconds } = useDurationTimer({
+  runningCount: toRef(props, 'runningCount'),
+  isGenerating: toRef(props, 'isGenerating'),
+  taskStartedAt: toRef(props, 'taskStartedAt'),
+  elapsed: toRef(props, 'elapsed'),
+})
 
 // 三个阶段的 agent 卡片各自独立展开态（它们的 index 各自从 0 起，不能共用）。
 const openAgents = ref<number[]>([])
@@ -33,7 +46,7 @@ const openSupplementAgents = ref<number[]>([])
         <span>生成结果
           <span v-if="totalSeconds != null" class="total-time">· 总耗时 ⏱ {{ formatDuration(totalSeconds) }}</span>
         </span>
-        <el-button v-if="hasCases" size="small" type="success" @click="downloadCases">下载 Excel</el-button>
+        <el-button v-if="cases.length" size="small" type="success" @click="$emit('download')">下载 Excel</el-button>
       </div>
     </template>
     <el-alert v-if="isGenerating" :title="genProgress || '生成中...'" type="info" :closable="false" />
@@ -46,7 +59,7 @@ const openSupplementAgents = ref<number[]>([])
          生成中展示该 agent 的实时原始流；完成后替换为解析好的用例列表。 -->
     <div v-if="agents.length" class="agent-area">
       <el-collapse v-model="openAgents">
-        <AgentStreamCard v-for="a in agents" :key="a.index" :agent="{ ...a, showCasesAsList: true }">
+        <AgentStreamCard v-for="a in agents" :key="a.index" :agent="a" show-cases-as-list running-message="生成中…">
           <template #time>
             <span v-if="agentSeconds(a) != null" class="agent-time">· ⏱ {{ formatDuration(agentSeconds(a)) }}</span>
           </template>
@@ -61,7 +74,8 @@ const openSupplementAgents = ref<number[]>([])
     <div v-if="reviewAgents.length" class="agent-area">
       <div class="phase-label">🔍 测试专家分模块并行评审</div>
       <el-collapse v-model="openReviewAgents">
-        <AgentStreamCard v-for="a in reviewAgents" :key="a.index" :agent="{ ...a, failedMessage: '该模块评审失败，已跳过（默认全部保留）' }">
+        <AgentStreamCard v-for="a in reviewAgents" :key="a.index" :agent="a"
+                         running-message="评审中…" failed-message="该模块评审失败，已跳过（默认全部保留）">
           <template #time>
             <span v-if="agentSeconds(a) != null" class="agent-time">· ⏱ {{ formatDuration(agentSeconds(a)) }}</span>
           </template>
@@ -73,7 +87,8 @@ const openSupplementAgents = ref<number[]>([])
     <div v-if="supplementAgents.length" class="agent-area">
       <div class="phase-label">➕ 分模块并行补充遗漏场景</div>
       <el-collapse v-model="openSupplementAgents">
-        <AgentStreamCard v-for="a in supplementAgents" :key="a.index" :agent="{ ...a, failedMessage: '该组补充失败，已跳过' }">
+        <AgentStreamCard v-for="a in supplementAgents" :key="a.index" :agent="a"
+                         running-message="补充中…" failed-message="该组补充失败，已跳过">
           <template #time>
             <span v-if="agentSeconds(a) != null" class="agent-time">· ⏱ {{ formatDuration(agentSeconds(a)) }}</span>
           </template>
@@ -82,7 +97,7 @@ const openSupplementAgents = ref<number[]>([])
     </div>
 
     <el-tag v-if="knowledgeSummary !== '无'" size="small" type="info" style="margin:8px 0">引用知识：{{ knowledgeSummary }}</el-tag>
-    <div v-if="hasCases" class="final-cases-title">最终用例（评审+补充后，共 {{ cases.length }} 条）</div>
+    <div v-if="cases.length" class="final-cases-title">最终用例（评审+补充后，共 {{ cases.length }} 条）</div>
     <div v-for="(c, idx) in cases" :key="idx" style="margin-bottom:8px">
       <el-collapse>
         <el-collapse-item>
@@ -93,20 +108,17 @@ const openSupplementAgents = ref<number[]>([])
             <span>{{ c.title }}</span>
           </template>
           <div v-if="c.precondition" style="margin-bottom:6px;font-size:13px">前置：{{ c.precondition }}</div>
-          <div v-if="c.steps" style="margin-bottom:6px;font-size:13px;white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
+          <div v-if="c.steps" style="margin-bottom:6px;font-size:13px;white-space:pre-wrap">步骤：{{ renderSteps(c.steps) }}</div>
           <div v-if="c.expected_result" style="font-size:13px;color:#67C23A">预期：{{ c.expected_result }}</div>
         </el-collapse-item>
       </el-collapse>
     </div>
-    <el-empty v-if="!isGenerating && !hasCases" description="输入需求后点击生成" />
+    <el-empty v-if="!isGenerating && !cases.length" description="输入需求后点击生成" />
   </el-card>
 </template>
 
 <style scoped>
 .results-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-.stream-output { margin-top: 10px; padding: 10px 12px; background: #1e1e1e; color: #d4d4d4; border-radius: 6px; font-family: 'SFMono-Regular', Menlo, Consolas, monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow-y: auto; }
-.stream-output.thinking { background: #2a2a2a; color: #9aa0a6; font-style: italic; }
-.thinking-badge { font-style: normal; color: #c8a95a; margin-bottom: 6px; font-weight: 600; }
 .module-list { margin: 8px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .module-list-label { font-size: 13px; color: #606266; font-weight: 600; }
 .module-tag { margin: 0; }

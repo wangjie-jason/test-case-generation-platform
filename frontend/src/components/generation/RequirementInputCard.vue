@@ -1,46 +1,44 @@
 <script setup lang="ts">
 import { UploadFilled, Loading, Close } from '@element-plus/icons-vue'
+import type { KnowledgeBase } from '@/types/project'
 
-defineProps<{
-  inputMode: 'text' | 'file'
-  requirementText: string
-  batchName: string
+interface TaskItem {
+  taskId: string
+  title: string
+  status: 'running' | 'done' | 'error'
+  genProgress: string
+  cases: unknown[]
+}
+
+const props = defineProps<{
   parsedFilename: string
   isParsing: boolean
   isClarifying: boolean
-  clarifiedText: string
   runningCount: number
-  taskList: Array<{
-    taskId: string
-    title: string
-    status: 'running' | 'done' | 'error'
-    genProgress?: string
-    cases: unknown[]
-  }>
+  taskList: TaskItem[]
   activeTaskId: string | null
-  kbs: Array<{ id: string; name: string }>
-  selectedKbs: string[]
+  kbs: KnowledgeBase[]
+  /** PRD 上传的实际执行者。必须把 Promise 原样返回给 el-upload 的 http-request，
+   *  否则 element-plus 不会调 onSuccess，文件条目会永远卡在「上传中」。 */
+  parsePrd: (file: File) => Promise<void>
 }>()
 
+// 输入类字段一律 v-model 双向绑定，父组件直接把 store 的 ref 接上来
+const inputMode = defineModel<'text' | 'file'>('inputMode', { required: true })
+const requirementText = defineModel<string>('requirementText', { required: true })
+const batchName = defineModel<string>('batchName', { required: true })
+const selectedKbs = defineModel<string[]>('selectedKbs', { required: true })
+const clarifiedText = defineModel<string>('clarifiedText', { required: true })
+
 const emit = defineEmits<{
-  (e: 'update:inputMode', v: 'text' | 'file'): void
-  (e: 'update:requirementText', v: string): void
-  (e: 'update:batchName', v: string): void
-  (e: 'update:selectedKbs', v: string[]): void
-  (e: 'update:clarifiedText', v: string): void
-  (e: 'prdUpload', file: File): void
   (e: 'clarify'): void
   (e: 'generate'): void
   (e: 'viewTask', id: string): void
   (e: 'dismissTask', id: string): void
 }>()
 
-function setMode(v: 'text' | 'file') { emit('update:inputMode', v) }
-function setText(v: string) { emit('update:requirementText', v) }
-function setName(v: string) { emit('update:batchName', v) }
-function setKbs(v: string[]) { emit('update:selectedKbs', v) }
-function setClarified(v: string) { emit('update:clarifiedText', v) }
-function onPrdUpload(options: any) { emit('prdUpload', options.file) }
+// el-upload 的 http-request：返回 Promise 才能让上传条目走到成功态
+function onPrdUpload(options: { file: File }) { return props.parsePrd(options.file) }
 </script>
 
 <template>
@@ -48,15 +46,14 @@ function onPrdUpload(options: any) { emit('prdUpload', options.file) }
     <template #header>
       <div style="display:flex;justify-content:space-between;align-items:center">
         <span>需求输入</span>
-        <el-radio-group :model-value="inputMode" size="small" @update:model-value="setMode">
+        <el-radio-group v-model="inputMode" size="small">
           <el-radio-button value="text">粘贴文本</el-radio-button>
           <el-radio-button value="file">上传PRD</el-radio-button>
         </el-radio-group>
       </div>
     </template>
     <template v-if="inputMode === 'text'">
-      <el-input :model-value="requirementText" @update:model-value="setText"
-                type="textarea" :rows="10" placeholder="粘贴需求描述或PRD内容..." />
+      <el-input v-model="requirementText" type="textarea" :rows="10" placeholder="粘贴需求描述或PRD内容..." />
     </template>
     <template v-else>
       <el-upload :auto-upload="true" :show-file-list="true" :http-request="onPrdUpload"
@@ -65,18 +62,15 @@ function onPrdUpload(options: any) { emit('prdUpload', options.file) }
         <div>拖拽或点击上传 PRD</div>
       </el-upload>
       <div v-if="isParsing" style="text-align:center;padding:8px">解析中...</div>
-      <el-input v-if="parsedFilename" :model-value="requirementText" @update:model-value="setText"
-                type="textarea" :rows="8" style="margin-top:8px" />
+      <el-input v-if="parsedFilename" v-model="requirementText" type="textarea" :rows="8" style="margin-top:8px" />
     </template>
     <div style="margin-top:12px">
       <div class="label">批次名称（用于区分不同需求）：</div>
-      <el-input :model-value="batchName" @update:model-value="setName"
-                placeholder="如：xxx需求测试用例" maxlength="100" />
+      <el-input v-model="batchName" placeholder="如：xxx需求测试用例" maxlength="100" />
     </div>
     <div style="margin-top:12px">
       <div class="label">选择知识库（可多选，空=不限）：</div>
-      <el-select :model-value="selectedKbs" @update:model-value="setKbs"
-                 multiple placeholder="选择知识库" collapse-tags style="width:100%">
+      <el-select v-model="selectedKbs" multiple placeholder="选择知识库" collapse-tags style="width:100%">
         <el-option v-for="k in kbs" :key="k.id" :label="k.name" :value="k.id" />
       </el-select>
     </div>
@@ -87,10 +81,9 @@ function onPrdUpload(options: any) { emit('prdUpload', options.file) }
       <div class="clarify-hint">
         已根据知识库补全下方需求，可直接修改。生成时将<strong>以此为准</strong>（留空则用上方原始需求）。
       </div>
-      <el-input :model-value="clarifiedText" @update:model-value="setClarified"
-                type="textarea" :autosize="{ minRows: 6, maxRows: 16 }"
+      <el-input v-model="clarifiedText" type="textarea" :autosize="{ minRows: 6, maxRows: 16 }"
                 placeholder="补全后的结构化需求" />
-      <el-button link type="info" size="small" @click="setClarified('')">清除补全，改用原始需求</el-button>
+      <el-button link type="info" size="small" @click="clarifiedText = ''">清除补全，改用原始需求</el-button>
     </div>
 
     <el-button type="primary" size="large" @click="emit('generate')" style="margin-top:12px;width:100%">

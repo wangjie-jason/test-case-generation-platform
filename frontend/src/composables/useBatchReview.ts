@@ -69,5 +69,5 @@ export function useBatchReview(
     ElMessage.success(`批量拒绝完成，成功 ${success} 条`)
   }
 
-  return { approveCase, rejectCase, approveAllInBatch, rejectAllInBatch, bumpBatchStats }
+  return { approveCase, rejectCase, approveAllInBatch, rejectAllInBatch }
 }

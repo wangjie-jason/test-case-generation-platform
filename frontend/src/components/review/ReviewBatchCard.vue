@@ -2,27 +2,38 @@
 import { ArrowRight } from '@element-plus/icons-vue'
 import { formatTokens } from '@/utils/formatTokens'
 import ReviewCaseItem from './ReviewCaseItem.vue'
+import type { BatchSummary, CaseRecord } from '@/api/generation'
 
 interface ReviewRejectReason {
   value: string
   label: string
 }
 
+/** 汇总（batches）+ 懒加载明细（batchItems）+ 当前 filter 拼出来的展示用批次 */
+interface ReviewBatchGroup extends BatchSummary {
+  items: CaseRecord[]
+  expanded: boolean
+  visibleTotal: number
+  loading: boolean
+  loaded: boolean
+}
+
 defineProps<{
-  batch: any
+  batch: ReviewBatchGroup
   rejectReasons: ReviewRejectReason[]
   hangsPunctuation: (title?: string) => boolean
+  isAllTab: boolean        // 「全部」tab：条数只显示总数，且允许插入用例
   showInsertSlot: boolean  // 筛选 tab 下隐藏插入位（位置会错位）
 }>()
 
 const emit = defineEmits<{
   (e: 'toggle', batchId: string): void
-  (e: 'approveAll', batchId: string, items: any[]): void
-  (e: 'rejectAll', batchId: string, items: any[], reason: string): void
+  (e: 'approveAll', batchId: string, items: CaseRecord[]): void
+  (e: 'rejectAll', batchId: string, items: CaseRecord[], reason: string): void
   (e: 'approve', caseId: string, batchId: string): void
   (e: 'reject', caseId: string, batchId: string, reason: string): void
-  (e: 'edit', c: any, batchId: string): void
-  (e: 'insertAfter', batchId: string, insertAt: number, c: any): void
+  (e: 'edit', c: CaseRecord, batchId: string): void
+  (e: 'insertAfter', batchId: string, insertAt: number): void
 }>()
 </script>
 
@@ -38,7 +49,7 @@ const emit = defineEmits<{
         </el-tooltip>
         <!-- 非「全部」tab 下显示「筛后 / 总数」，让人知道这批被筛掉了多少 -->
         <span class="batch-meta-info">
-          <template v-if="batch.visibleTotal === batch.total">{{ batch.total }} 条</template>
+          <template v-if="isAllTab">{{ batch.total }} 条</template>
           <template v-else>{{ batch.visibleTotal }} / {{ batch.total }} 条</template>
           · {{ batch.created_at?.slice(0, 16) }}
           <!-- 该批的 token 消耗。用量统计上线前的批次没有流水，tokens 为 null 时
@@ -91,6 +102,10 @@ const emit = defineEmits<{
         </div>
         <!-- 用例列表在批次内部独立滚动（max-height 60vh），批次多时不必整页下滑 -->
         <div v-else class="case-scroll">
+          <!-- 首个用例之前的插入位：insertAt=0 即插到批次最开头 -->
+          <div class="insert-slot" v-if="showInsertSlot" @click="emit('insertAfter', batch.batch_id, 0)">
+            <span class="insert-line"></span><span class="insert-btn">+ 在此处插入用例</span><span class="insert-line"></span>
+          </div>
           <template v-for="(c, idx) in batch.items" :key="c.id">
             <ReviewCaseItem
               :c="c"
@@ -100,10 +115,9 @@ const emit = defineEmits<{
               @approve="(caseId, bid) => emit('approve', caseId, bid)"
               @reject="(caseId, bid, reason) => emit('reject', caseId, bid, reason)"
               @edit="(cc, bid) => emit('edit', cc, bid)"
-              @insertAfter="(bid, insertAt) => emit('insertAfter', bid, insertAt, c)"
             />
             <!-- 每条 case 之后的插入位；筛选 tab 下隐藏（否则插入位置会错位） -->
-            <div class="insert-slot" v-if="showInsertSlot" @click="emit('insertAfter', batch.batch_id, idx + 1, c)">
+            <div class="insert-slot" v-if="showInsertSlot" @click="emit('insertAfter', batch.batch_id, idx + 1)">
               <span class="insert-line"></span><span class="insert-btn">+ 在此处插入用例</span><span class="insert-line"></span>
             </div>
           </template>

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { priorityTagType } from '@/utils/priority'
+import { renderSteps } from '@/utils/renderSteps'
+import type { CaseRecord } from '@/api/generation'
 
 interface ReviewRejectReason {
   value: string
@@ -7,7 +9,7 @@ interface ReviewRejectReason {
 }
 
 defineProps<{
-  c: any
+  c: CaseRecord
   batchId: string
   rejectReasons: ReviewRejectReason[]
   /** 全角开括号（【（「等）的墨迹在字框内偏右，盒子左边界虽与「前置：」对齐，
@@ -19,8 +21,7 @@ defineProps<{
 const emit = defineEmits<{
   (e: 'approve', caseId: string, batchId: string): void
   (e: 'reject', caseId: string, batchId: string, reason: string): void
-  (e: 'edit', c: any, batchId: string): void
-  (e: 'insertAfter', batchId: string, insertAt: number, c: any): void
+  (e: 'edit', c: CaseRecord, batchId: string): void
 }>()
 </script>
 
@@ -51,7 +52,7 @@ const emit = defineEmits<{
     </div>
     <div class="ri-body">
       <div v-if="c.precondition" class="ri-line">前置：{{ c.precondition }}</div>
-      <div v-if="c.steps" class="ri-line" style="white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
+      <div v-if="c.steps" class="ri-line" style="white-space:pre-wrap">步骤：{{ renderSteps(c.steps) }}</div>
       <div v-if="c.expected_result" class="ri-line">预期：{{ c.expected_result }}</div>
     </div>
   </div>

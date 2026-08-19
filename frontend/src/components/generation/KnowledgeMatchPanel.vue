@@ -11,10 +11,10 @@ const props = defineProps<{
   knowledgeMatches: KnowledgeMatches
 }>()
 
-// 包一层 ref，composable 内部统一用 ref.value 访问。两边实现不一致时 ref 更稳。
+// props 不是 ref，用 computed 包一层转成 Ref 交给 composable（它内部统一 .value 访问）
 const counts = computed(() => props.knowledgeCounts)
 const matches = computed(() => props.knowledgeMatches)
-const { summary, groups, hasAny, title, description } = useKnowledgeMatches(counts, matches)
+const { summary, groups, hasAny, matchTitle, matchDescription } = useKnowledgeMatches(counts, matches)
 </script>
 
 <template>
@@ -35,8 +35,8 @@ const { summary, groups, hasAny, title, description } = useKnowledgeMatches(coun
             <el-tag size="small" effect="plain">{{ group.items.length || knowledgeCounts[group.countKey] || 0 }}</el-tag>
           </div>
           <div v-for="(item, idx) in group.items" :key="`${group.key}-${idx}`" class="match-item">
-            <div class="match-title">{{ title(group.key, item) }}</div>
-            <div v-if="description(group.key, item)" class="match-desc">{{ description(group.key, item) }}</div>
+            <div class="match-title">{{ matchTitle(group.key, item) }}</div>
+            <div v-if="matchDescription(group.key, item)" class="match-desc">{{ matchDescription(group.key, item) }}</div>
           </div>
         </div>
       </template>

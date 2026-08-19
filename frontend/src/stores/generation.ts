@@ -7,7 +7,7 @@ import type { KnowledgeBase } from '@/types/project'
 import type { GeneratedTestCase } from '@/types/testCase'
 
 // 单个模块（agent）的前端状态：每个并发生成的模块对应一张卡片。
-interface AgentState {
+export interface AgentState {
   index: number
   module: string
   status: 'running' | 'done' | 'failed'

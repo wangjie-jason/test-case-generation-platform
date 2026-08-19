@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { onMounted, watch, computed } from 'vue'
+import { onMounted, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
 import { useGenerationStore } from '@/stores/generation'
-import { generationApi } from '@/api/generation'
+import { generationApi, type CaseRecord } from '@/api/generation'
 import { saveBlob } from '@/utils/saveBlob'
 import { useBatchList } from '@/composables/useBatchList'
-import { useDurationTimer } from '@/composables/useDurationTimer'
+import { useKnowledgeMatches } from '@/composables/useKnowledgeMatches'
 import RequirementInputCard from '@/components/generation/RequirementInputCard.vue'
 import KnowledgeMatchPanel from '@/components/generation/KnowledgeMatchPanel.vue'
 import GenerationOutputCard from '@/components/generation/GenerationOutputCard.vue'
@@ -34,6 +34,11 @@ function refreshHistory() {
   fetchBatches()
 }
 
+// 历史页下载时若批次没展开过，会现拉一次全量；把结果回写缓存，之后展开不再请求。
+function cacheBatchItems(batchId: string, items: CaseRecord[]) {
+  batchItems.value[batchId] = items
+}
+
 onMounted(() => { store.fetchKbs(); fetchBatches() })
 
 // 生成结束时 store 会把 historyDirty +1，触发这里重拉批次汇总 + 清空 items 缓存，
@@ -58,23 +63,8 @@ async function downloadCases() {
   } catch (e: any) { ElMessage.error(e.message) }
 }
 
-// 秒表与时长计算：把 useDurationTimer 拿出来专门管「运行时长」类派生值
-const { formatDuration, agentSeconds, totalSeconds } = useDurationTimer(
-  runningCount, isGenerating, taskStartedAt, elapsed,
-)
-
-const knowledgeSummary = computed(() => {
-  const c = knowledgeCounts.value
-  const p: string[] = []
-  if (c.field_dicts_count) p.push(`${c.field_dicts_count} 字段`)
-  if (c.business_rules_count) p.push(`${c.business_rules_count} 规则`)
-  if (c.state_machines_count) p.push(`${c.state_machines_count} 状态`)
-  if (c.term_mappings_count) p.push(`${c.term_mappings_count} 术语`)
-  if (c.prd_chunks_count) p.push(`${c.prd_chunks_count} PRD`)
-  if (c.defect_chunks_count) p.push(`${c.defect_chunks_count} 缺陷`)
-  if (c.historical_cases_count) p.push(`${c.historical_cases_count} 历史用例`)
-  return p.join(' / ') || '无'
-})
+// 命中知识的条数摘要：与右侧命中面板同一份实现，避免两处各写一遍
+const { summary: knowledgeSummary } = useKnowledgeMatches(knowledgeCounts, knowledgeMatches)
 </script>
 
 <template>
@@ -89,28 +79,23 @@ const knowledgeSummary = computed(() => {
       <div class="top-panels">
         <div class="input-panel">
           <RequirementInputCard
-            :input-mode="inputMode"
-            :requirement-text="requirementText"
-            :batch-name="batchName"
+            v-model:input-mode="inputMode"
+            v-model:requirement-text="requirementText"
+            v-model:batch-name="batchName"
+            v-model:selected-kbs="selectedKbs"
+            v-model:clarified-text="clarifiedText"
             :parsed-filename="parsedFilename"
             :is-parsing="isParsing"
             :is-clarifying="isClarifying"
-            :clarified-text="clarifiedText"
             :running-count="runningCount"
             :task-list="taskList"
             :active-task-id="activeTaskId"
             :kbs="kbs"
-            :selected-kbs="selectedKbs"
-            @update:inputMode="v => inputMode = v"
-            @update:requirementText="v => requirementText = v"
-            @update:batchName="v => batchName = v"
-            @update:selectedKbs="v => selectedKbs = v"
-            @update:clarifiedText="v => clarifiedText = v"
-            @prdUpload="handlePrdUpload"
+            :parse-prd="handlePrdUpload"
             @clarify="handleClarify"
             @generate="handleGenerate"
-            @viewTask="(id: string) => store.viewTask(id)"
-            @dismissTask="(id: string) => store.dismissTask(id)"
+            @viewTask="store.viewTask"
+            @dismissTask="store.dismissTask"
           />
         </div>
         <div class="knowledge-panel">
@@ -134,12 +119,11 @@ const knowledgeSummary = computed(() => {
           :supplement-agents="supplementAgents"
           :stream-text="streamText"
           :cases="cases"
-          :total-seconds="totalSeconds"
-          :has-cases="cases.length > 0"
           :knowledge-summary="knowledgeSummary"
-          :format-duration="formatDuration"
-          :agent-seconds="agentSeconds"
-          :download-cases="downloadCases"
+          :running-count="runningCount"
+          :task-started-at="taskStartedAt"
+          :elapsed="elapsed"
+          @download="downloadCases"
         />
       </div>
     </div>
@@ -152,6 +136,7 @@ const knowledgeSummary = computed(() => {
         :expanded-batch="expandedBatch"
         @refresh="refreshHistory"
         @toggle="toggleBatch"
+        @cached="cacheBatchItems"
       />
     </div>
   </div>

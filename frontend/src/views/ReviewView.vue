@@ -64,11 +64,15 @@ function hangsPunctuation(title?: string) {
 }
 
 const { approveCase, rejectCase, approveAllInBatch, rejectAllInBatch } = useBatchReview(batches, batchItems)
-const edit = useEditCaseDialog(batchItems)
-const insert = useInsertCaseDialog(batches, batchItems)
-
-function openEdit(c: any, bid: string) { edit.open(c, bid) }
-function openInsert(bid: string, insertAt: number) { insert.open(bid, insertAt) }
+// 解构成扁平 ref，避免模板里出现 edit.form.value 这类手动解包
+const {
+  dialogVisible: editVisible, saving: editSaving, form: editForm,
+  open: openEdit, save: saveEdit,
+} = useEditCaseDialog(batchItems)
+const {
+  dialogVisible: insertVisible, saving: insertSaving, form: insertForm,
+  open: openInsert, save: saveInsert,
+} = useInsertCaseDialog(batches, batchItems)
 </script>
 
 <template>
@@ -98,6 +102,7 @@ function openInsert(bid: string, insertAt: number) { insert.open(bid, insertAt) 
       :batch="batch"
       :reject-reasons="rejectReasons"
       :hangs-punctuation="hangsPunctuation"
+      :is-all-tab="filterTab === 'all'"
       :show-insert-slot="filterTab === 'all'"
       @toggle="toggleBatch"
       @approveAll="approveAllInBatch"
@@ -110,18 +115,18 @@ function openInsert(bid: string, insertAt: number) { insert.open(bid, insertAt) 
   </div>
 
   <EditCaseDialog
-    v-model:visible="edit.dialogVisible.value"
-    v-model:form="edit.form.value"
-    :saving="edit.saving.value"
-    @save="edit.save"
-    @cancel="edit.dialogVisible.value = false"
+    v-model:visible="editVisible"
+    v-model:form="editForm"
+    :saving="editSaving"
+    @save="saveEdit"
+    @cancel="editVisible = false"
   />
   <InsertCaseDialog
-    v-model:visible="insert.dialogVisible.value"
-    v-model:form="insert.form.value"
-    :saving="insert.saving.value"
-    @save="insert.save"
-    @cancel="insert.dialogVisible.value = false"
+    v-model:visible="insertVisible"
+    v-model:form="insertForm"
+    :saving="insertSaving"
+    @save="saveInsert"
+    @cancel="insertVisible = false"
   />
 </template>
 

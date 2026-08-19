@@ -5,6 +5,7 @@ import { ArrowRight } from '@element-plus/icons-vue'
 import { generationApi, type BatchSummary, type CaseRecord } from '@/api/generation'
 import { saveBlob } from '@/utils/saveBlob'
 import { priorityTagType } from '@/utils/priority'
+import { renderSteps } from '@/utils/renderSteps'
 
 const props = defineProps<{
   batches: BatchSummary[]
@@ -16,6 +17,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'refresh'): void
   (e: 'toggle', batchId: string): void
+  // 下载时现拉到的全量用例回写父组件缓存，避免展开/再下载重复请求
+  (e: 'cached', batchId: string, items: CaseRecord[]): void
 }>()
 
 interface BatchGroup extends BatchSummary {
@@ -32,11 +35,13 @@ const batchGroups = computed<BatchGroup[]>(() => props.batches.map(b => ({
 async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'all') {
   try {
     // 保证下载到的是全量：即使用户没展开也现拉一次。
-    const items = props.batchItems[batch.batch_id] || await generationApi.listCases(batch.batch_id)
+    const cached = props.batchItems[batch.batch_id]
+    const items = cached || await generationApi.listCases(batch.batch_id)
+    if (!cached) emit('cached', batch.batch_id, items)
     // 「仅通过」只认审核动作的结论 review.status === 'approved'，与用例是否被人工
     // 编辑过（edited）无关：编辑后点了通过就能下载，没点通过就不算。
     const picked = scope === 'approved'
-      ? items.filter((c: any) => c.review?.status === 'approved')
+      ? items.filter(c => c.review?.status === 'approved')
       : items
     if (!picked.length) {
       ElMessage.warning(scope === 'approved' ? '该批次暂无审核通过的用例' : '该批次没有用例')
@@ -111,7 +116,7 @@ async function downloadBatch(batch: BatchSummary, scope: 'all' | 'approved' = 'a
                 <el-tag v-if="c.origin === 'supplement'" size="small" type="primary" effect="plain" style="margin-right:6px">补充</el-tag>
                 <strong>{{ c.title }}</strong>
                 <div v-if="c.precondition" style="color:#909399">前置：{{ c.precondition }}</div>
-                <div v-if="c.steps" style="color:#909399;white-space:pre-wrap">步骤：{{ typeof c.steps === 'string' ? c.steps : JSON.stringify(c.steps) }}</div>
+                <div v-if="c.steps" style="color:#909399;white-space:pre-wrap">步骤：{{ renderSteps(c.steps) }}</div>
                 <div v-if="c.expected_result" style="color:#909399">预期：{{ c.expected_result }}</div>
               </div>
             </div>

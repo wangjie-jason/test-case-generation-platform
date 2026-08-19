@@ -22,7 +22,7 @@ export interface MatchGroup {
  * 知识库命中信息的两类展示工具：
  * - summary：把命中条数拼成可读字符串（「3 字段 / 2 规则 / ... / 无」）
  * - groups / hasAny：按组分类渲染（每组一块卡片），含过滤逻辑
- * - title / description：单条命中的标题/描述生成（含字段名兜底、长度截断）
+ * - matchTitle / matchDescription：单条命中的标题/描述生成（含字段名兜底、长度截断）
  *
  * 之前在 GenerationView.vue 里散落，改 prompt/扩一类知识时容易漏。
  */
@@ -45,7 +45,6 @@ export function useKnowledgeMatches(
 
   const groups = computed<MatchGroup[]>(() => {
     const m = knowledgeMatches.value
-    const c = knowledgeCounts.value
     const raw: MatchGroup[] = [
       { key: 'field_dicts', title: '字段字典', countKey: 'field_dicts_count', items: m.field_dicts || [] },
       { key: 'business_rules', title: '业务规则', countKey: 'business_rules_count', items: m.business_rules || [] },
@@ -61,7 +60,7 @@ export function useKnowledgeMatches(
 
   const hasAny = computed(() => groups.value.some(g => g.items.length))
 
-  function title(groupKey: string, item: Record<string, unknown>): string {
+  function matchTitle(groupKey: string, item: Record<string, unknown>): string {
     if (groupKey === 'field_dicts') return `${item.display_name || ''}${item.field_name ? `（${item.field_name}）` : ''}` || '字段'
     if (groupKey === 'business_rules') return String(item.rule_name || '业务规则')
     if (groupKey === 'state_machines') return `${item.entity || '对象'}：${item.from_state || '-'} → ${item.to_state || '-'}`
@@ -71,12 +70,12 @@ export function useKnowledgeMatches(
     return String(item.filename || item.id || '知识片段')
   }
 
-  function description(groupKey: string, item: Record<string, unknown>): string {
+  function matchDescription(groupKey: string, item: Record<string, unknown>): string {
     const value = item.description || item.expression || item.condition || item.mapping_desc || item.text || ''
     const text = String(value || '')
     if (!text) return groupKey === 'field_dicts' && item.data_type ? `类型：${item.data_type}` : ''
     return text.length > 160 ? `${text.slice(0, 160)}...` : text
   }
 
-  return { summary, groups, hasAny, title, description }
+  return { summary, groups, hasAny, matchTitle, matchDescription }
 }

@@ -1,4 +1,16 @@
 import { ref, watch, computed, onUnmounted, type Ref } from 'vue'
+import type { AgentState } from '@/stores/generation'
+
+interface DurationTimerOptions {
+  /** 有任务在跑时才开表，避免空转 */
+  runningCount: Ref<number>
+  /** 当前查看的任务是否在生成中 */
+  isGenerating: Ref<boolean>
+  /** 当前查看任务的开始时刻（ms），运行中据此现算总耗时 */
+  taskStartedAt: Ref<number | null | undefined>
+  /** 后端下发的总耗时（秒），完成后以它为权威值 */
+  elapsed: Ref<number | null | undefined>
+}
 
 /**
  * 实时秒表 composable：让「运行时长」类计算属性随当前时间刷新。
@@ -7,9 +19,9 @@ import { ref, watch, computed, onUnmounted, type Ref } from 'vue'
  * 时间增长而变化，但普通 computed 只在依赖变化时重算——把「当前时间」当依赖即可。
  *
  * 用法：
- *   const { now, formatDuration, agentSeconds, totalSeconds } = useDurationTimer(
+ *   const { now, formatDuration, agentSeconds, totalSeconds } = useDurationTimer({
  *     runningCount, isGenerating, taskStartedAt, elapsed,
- *   )
+ *   })
  *
  * - `now` 是驱动秒表刷新的 ref。
  * - `formatDuration(sec)` 把秒数格式化成「12.3s」/「1分23秒」。
@@ -18,12 +30,7 @@ import { ref, watch, computed, onUnmounted, type Ref } from 'vue'
  *
  * runningCount>0 时启动 200ms 定时器，=0 时关掉，避免空转。组件卸载时也会关。
  */
-export function useDurationTimer(
-  runningCount: Ref<number>,
-  isGenerating: Ref<boolean>,
-  taskStartedAt: Ref<number | null | undefined>,
-  elapsed: Ref<number | null | undefined>,
-) {
+export function useDurationTimer({ runningCount, isGenerating, taskStartedAt, elapsed }: DurationTimerOptions) {
   const now = ref(Date.now())
   let timer: ReturnType<typeof setInterval> | null = null
 
@@ -45,7 +52,7 @@ export function useDurationTimer(
     return `${m}分${s}秒`
   }
 
-  function agentSeconds(a: { status: string; startedAt: number | null; elapsed: number | null }): number | null {
+  function agentSeconds(a: Pick<AgentState, 'status' | 'startedAt' | 'elapsed'>): number | null {
     if (a.status === 'running' && a.startedAt != null) {
       return Math.round((now.value - a.startedAt) / 100) / 10
     }
