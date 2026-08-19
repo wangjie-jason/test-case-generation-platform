@@ -219,7 +219,8 @@ async def update_case(case_id: str, data: UpdateCaseRequest, db: AsyncSession = 
 
     # 只接受这五个字段；未传的字段保持原值，允许只改一处。前端目前是整表提交，
     # 但接口设计成 patch 语义，方便后续做 inline 快改。priority 允许改成 None（清空）。
-    editable = ("title", "priority", "precondition", "steps", "expected_result")
+    # 字段清单取自 schema 本身，避免与 UpdateCaseRequest 手写两份再漂移。
+    editable = tuple(UpdateCaseRequest.model_fields)
     touched = False
     values = data.model_dump(exclude_unset=True)
     for k in editable:

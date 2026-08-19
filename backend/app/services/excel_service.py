@@ -91,7 +91,7 @@ class ExcelExportService:
             ws.append([
                 c.get("id", ""),
                 c.get("title", ""),
-                c.get("priority", "P1"),
+                c.get("priority") or "P1",
                 c.get("precondition", ""),
                 steps_str,
                 c.get("expected_result", ""),
