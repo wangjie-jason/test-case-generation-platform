@@ -224,7 +224,7 @@ event: error     → {message: "..."}
 - `services/llm_service.py` (LLM 同步+SSE流式，httpx.AsyncClient)
 - `services/prompt_service.py` (三层Prompt构造: 系统规则+知识上下文+用户需求)
 - `services/validation_service.py` (字段存在性+状态可达性校验)
-- `services/generator_service.py` (编排器：`generate_stream` 串起 检索→生成→校验+评审→补充→排序 五阶段，每阶段一个 async generator，产物走 `_results` 事件回传)
+- `services/generator_service.py` (薄壳 re-export；编排器实际在 `services/pipeline_service.py` 的 `GeneratorService.generate_stream`，五阶段拆到 `pipeline_generate_service.py`/`pipeline_review_service.py`/`pipeline_supplement_service.py`，跨阶段共享工具在 `pipeline_context_service.py`，外部依赖接缝在 `pipeline_deps.py`；每阶段一个 async generator，产物走 `_results` 事件回传)
 - `schemas/generation.py` + `routers/generation.py`
 - 后处理: 校验LLM输出的knowledge_refs ID是否真实存在
 

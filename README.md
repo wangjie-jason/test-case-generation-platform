@@ -65,6 +65,8 @@ source venv/bin/activate && cd backend && uvicorn app.main:app --port 8000
 cd frontend && npm run dev
 ```
 
+数据库结构由 Alembic 管理，启动时自动迁移（新库建表、老库自动识别并补列），无需手工执行任何命令。
+
 打开 http://localhost:3000
 
 ### 让局域网内的同事访问
