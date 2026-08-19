@@ -50,6 +50,7 @@ declare module 'vue' {
     ElUpload: typeof import('element-plus/es')['ElUpload']
     FieldDictForm: typeof import('./src/components/knowledge/FieldDictForm.vue')['default']
     FieldDictTable: typeof import('./src/components/knowledge/FieldDictTable.vue')['default']
+    KnowledgeResourceTable: typeof import('./src/components/knowledge/KnowledgeResourceTable.vue')['default']
     PrdDocumentPanel: typeof import('./src/components/knowledge/PrdDocumentPanel.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
