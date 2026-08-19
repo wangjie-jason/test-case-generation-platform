@@ -59,7 +59,7 @@ npm install
 
 ```bash
 # 终端 1 - 后端（在项目根目录激活 venv，再进 backend 启动）
-source venv/bin/activate && cd backend && uvicorn app.main:app --port 8000
+source venv/bin/activate && cd backend && alembic upgrade head && uvicorn app.main:app --port 8000
 
 # 终端 2 - 前端
 cd frontend && npm run dev

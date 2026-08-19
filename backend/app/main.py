@@ -5,14 +5,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.database import init_db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
     Path("./data").mkdir(parents=True, exist_ok=True)
-    await init_db()
     yield
 
 
