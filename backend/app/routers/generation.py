@@ -10,7 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db, now_local
 from app.models.review_record import ReviewRecord
 from app.models.test_case import TestCase
-from app.schemas.generation import GenerateRequest
+from app.schemas.generation import (
+    CreateCaseRequest,
+    ExportCasesRequest,
+    GenerateRequest,
+    ReviewCaseRequest,
+    UpdateCaseRequest,
+)
 from app.services import usage_service
 from app.services.excel_service import ExcelExportService
 from app.services.generator_service import GeneratorService
@@ -200,7 +206,7 @@ async def list_cases(batch_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/cases/{case_id}")
-async def update_case(case_id: str, data: dict, db: AsyncSession = Depends(get_db)):
+async def update_case(case_id: str, data: UpdateCaseRequest, db: AsyncSession = Depends(get_db)):
     """审核阶段的人工微调：允许改 title/priority/precondition/steps/expected_result 五字段。
     编辑只改用例内容 + 打 edited 标记，不碰 review 记录。
     好处：
@@ -215,9 +221,10 @@ async def update_case(case_id: str, data: dict, db: AsyncSession = Depends(get_d
     # 但接口设计成 patch 语义，方便后续做 inline 快改。priority 允许改成 None（清空）。
     editable = ("title", "priority", "precondition", "steps", "expected_result")
     touched = False
+    values = data.model_dump(exclude_unset=True)
     for k in editable:
-        if k in data and data[k] is not None:
-            new_val = data[k]
+        if k in values and values[k] is not None:
+            new_val = values[k]
             # steps 允许前端传数组或字符串；DB 里 steps 是 Text，跟 task_service 的写入保持一致——数组转 JSON 存。
             if k == "steps" and isinstance(new_val, list):
                 new_val = json.dumps(new_val, ensure_ascii=False)
@@ -240,32 +247,30 @@ async def update_case(case_id: str, data: dict, db: AsyncSession = Depends(get_d
 
 
 @router.post("/cases")
-async def create_case(data: dict, db: AsyncSession = Depends(get_db)):
+async def create_case(data: CreateCaseRequest, db: AsyncSession = Depends(get_db)):
     """审核时手动插入用例。前端传 batch_id + 内容字段 + 可选 prev_case_id/next_case_id 锚点。
     定位策略见 _resolve_insert_ts：新 case 的 created_at 落在前后两条之间，自然排到目标位置。
     手动插入的 case source='manual'、edited=True、review 直接置 approved。"""
-    batch_id = data.get("batch_id")
-    if not batch_id:
-        raise HTTPException(400, "batch_id 必填")
-    title = (data.get("title") or "").strip()
+    batch_id = data.batch_id
+    title = data.title.strip()
     if not title:
         raise HTTPException(400, "title 必填")
 
-    new_ts = await _resolve_insert_ts(db, batch_id, data.get("prev_case_id"), data.get("next_case_id"))
+    new_ts = await _resolve_insert_ts(db, batch_id, data.prev_case_id, data.next_case_id)
 
     # 拿该批任一条 case 抄 req_text，保持批次上下文一致（生成时都是同一个需求）
     batch_ref = (await db.execute(select(TestCase).where(TestCase.batch_id == batch_id).limit(1))).scalar_one_or_none()
 
-    steps = data.get("steps") or ""
+    steps = data.steps or ""
     if isinstance(steps, list):
         steps = json.dumps(steps, ensure_ascii=False)
 
     new_case = TestCase(
         title=title,
-        priority=(data.get("priority") or None),
-        precondition=data.get("precondition"),
+        priority=(data.priority or None),
+        precondition=data.precondition,
         steps=steps,
-        expected_result=data.get("expected_result"),
+        expected_result=data.expected_result,
         source="manual",
         edited=True,
         edited_at=now_local(),
@@ -286,23 +291,23 @@ async def create_case(data: dict, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/cases/{case_id}/review")
-async def review_case(case_id: str, data: dict, db: AsyncSession = Depends(get_db)):
+async def review_case(case_id: str, data: ReviewCaseRequest, db: AsyncSession = Depends(get_db)):
     tc = await db.get(TestCase, case_id)
     if not tc: raise HTTPException(404, "用例不存在")
-    status = data.get("status")
+    status = data.status
     rr = await db.execute(select(ReviewRecord).where(ReviewRecord.case_id == case_id))
     rec = rr.scalars().first()
-    if rec: rec.status = status; rec.reject_reason = data.get("reject_reason") if status == "rejected" else None
+    if rec: rec.status = status; rec.reject_reason = data.reject_reason if status == "rejected" else None
     else:
-        rec = ReviewRecord(case_id=case_id, status=status, reject_reason=data.get("reject_reason") if status == "rejected" else None)
+        rec = ReviewRecord(case_id=case_id, status=status, reject_reason=data.reject_reason if status == "rejected" else None)
         db.add(rec)
     await db.commit()
     return {"status": status}
 
 
 @router.post("/cases/export")
-async def export_cases(data: dict):
-    excel_bytes = ExcelExportService.export_test_cases(data.get("cases", []))
+async def export_cases(data: ExportCasesRequest):
+    excel_bytes = ExcelExportService.export_test_cases([case.model_dump() for case in data.cases])
     return StreamingResponse(BytesIO(excel_bytes.getvalue()), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=test_cases.xlsx"})
 
 
