@@ -34,14 +34,12 @@ from app.services.pipeline_supplement import (
     _stage_supplement,
     _supplement_worker,
 )
-from app.services.prompt_service import PromptService
 from app.services.retrieval_service import RetrievalService
 from app.services.validation_service import ValidationService
 
 __all__ = [
     "GeneratorService",
     "LLMService",
-    "PromptService",
     "RetrievalService",
     "ValidationService",
     "settings",
