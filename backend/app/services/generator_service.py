@@ -198,7 +198,9 @@ async def _get_historical_cases(text: str, keywords: list[str], kb_ids: list[str
         return []
     try:
         c = ChromaStore()
-        results = [r for r in c.search("historical_cases", text, top_k=3, kb_ids=kb_ids) if r.get("text")]
+        results = [r for r in await asyncio.to_thread(
+            c.search, "historical_cases", text, 3, kb_ids
+        ) if r.get("text")]
         if not results:
             return []
         # 与 _vector_chunks 一致的距离阈值过滤：最近的示例都太远说明与需求无关，
@@ -824,4 +826,3 @@ def _supplement_prompt(kept: list[dict], deleted: list[dict], gaps: list[str]) -
 title 的【】前缀要与上面已有用例保持同一套层级路径与粒度：补的场景若属于已有某个功能点，
 就复用那个功能点的完整前缀（照抄到最后一级），别只写到页面/区块那一级——前缀决定用例在
 最终列表里排到哪儿，粒度不一致就会脱离相关功能点。确实是全新功能点时，再按同样规则下钻。"""
-

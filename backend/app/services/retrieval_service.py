@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from sqlalchemy import or_, select
@@ -39,8 +40,10 @@ class RetrievalService:
         prd_docs = await _search_long_text(PrdDocument, db, keywords, kb_ids, "raw_text", extra_fields=[PrdDocument.filename])
         defects = await _search_long_text(DefectRecord, db, keywords, kb_ids, "description", extra_fields=[DefectRecord.title])
 
-        prd_chunks = _vector_chunks("prd_documents", query, top_k, prd_docs, "raw_text", include_vectors, kb_ids)
-        defect_chunks = _vector_chunks("defect_records", query, top_k, defects, "description", include_vectors, kb_ids)
+        prd_chunks, defect_chunks = await asyncio.gather(
+            _vector_chunks("prd_documents", query, top_k, prd_docs, "raw_text", include_vectors, kb_ids),
+            _vector_chunks("defect_records", query, top_k, defects, "description", include_vectors, kb_ids),
+        )
 
         return {
             "field_dicts": [_fd(f) for f in field_dicts],
@@ -106,12 +109,12 @@ async def _search_long_text(model, db, keywords, kb_ids, text_attr, extra_fields
 def _fd(f): return {"id": f.id, "field_name": f.field_name, "display_name": f.display_name, "data_type": f.data_type, "description": f.description}
 
 
-def _vector_chunks(collection, query, top_k, db_results, text_attr, include_vectors, kb_ids):
+async def _vector_chunks(collection, query, top_k, db_results, text_attr, include_vectors, kb_ids):
     if not include_vectors:
         return []
     try:
         chroma = ChromaStore()
-        results = chroma.search(collection, query, top_k=top_k, kb_ids=kb_ids)
+        results = await asyncio.to_thread(chroma.search, collection, query, top_k, kb_ids)
         if results:
             # 距离阈值过滤：最近的结果都太远，说明整个集合与查询无关。
             min_d = min(r.get("distance", float("inf")) for r in results)
