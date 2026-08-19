@@ -9,18 +9,60 @@ from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-import app.services.generator_service as _gs  # late-bound: tests monkeypatch gs.LLMService / gs.ValidationService
-from app.services.pipeline_context import (
+from app.services import pipeline_deps as deps
+from app.services.pipeline_context_service import (
     _Context,
     _has_valid_cases,
     _parallel_agents,
-    _review_prompt,
 )
 from app.utils.case_grouping import title_path
 from app.utils.llm_parsing import parse_json_object, salvage_reviews
 from app.utils import token_usage
 
 logger = logging.getLogger(__name__)
+
+
+def _case_brief(case: dict, idx: int) -> str:
+    """评审用：把一条用例压缩成简短文本，带序号。"""
+    steps = case.get("steps", "")
+    if isinstance(steps, list):
+        steps = "; ".join(str(s) for s in steps)
+    return (
+        f"#{idx} 【{case.get('priority', '')}】{case.get('title', '')}\n"
+        f"   前置：{(case.get('precondition') or '')[:80]}\n"
+        f"   步骤：{str(steps)[:160]}\n"
+        f"   预期：{(case.get('expected_result') or '')[:120]}"
+    )
+
+
+def _review_prompt(cases: list[dict], warnings: list[dict]) -> str:
+    briefs = "\n".join(_case_brief(c, i) for i, c in enumerate(cases))
+    warn_text = ""
+    if warnings:
+        wt = "\n".join(f"- #{w['case_index']} {'; '.join(w['warnings'])}" for w in warnings[:10])
+        warn_text = f"\n\n## 自动校验已发现的问题（供参考）\n{wt}"
+    return f"""你现在是测试评审专家。请逐条评审下面已生成的测试用例，挑出其中**应当删除**的。
+
+删除标准（满足任一即删）：
+- 引用了不存在的字段/规则，或预期结果违反业务规则
+- 与其它用例完全重复
+- 步骤或预期含糊、不可执行、自相矛盾
+- 明显偏离需求
+
+注意：不要改写用例内容，只做删除判断。同时指出整体上还遗漏了哪些应覆盖但当前没有的场景。
+
+## 待评审用例（共 {len(cases)} 条）
+{briefs}{warn_text}
+
+**只列出要删除的用例**，判定保留的一律不要输出——未列出的自动视为保留。逐条输出 keep
+会让响应长度随用例数线性膨胀、撑满 token 上限，一旦被截断，后面所有判定都会丢失。
+index 必须照抄上面每条用例前的 #编号，不要自己重新数。
+
+只输出如下 JSON（不要 markdown 代码块）：
+{{
+  "reviews": [{{"index": <用例序号>, "verdict": "delete", "reason": "<简短理由>"}}],
+  "gaps": ["<遗漏场景1>", "<遗漏场景2>"]
+}}"""
 
 
 async def _stage_review(db: AsyncSession, ctx: _Context,
@@ -34,14 +76,14 @@ async def _stage_review(db: AsyncSession, ctx: _Context,
     校验必须在这里跑（评审之前）：告警按用例下标引用，要与评审分组用的是同一份列表下标。
     """
     yield {"type": "progress", "stage": "validating", "message": "正在校验..."}
-    warnings = await _gs.ValidationService.validate_cases(db, cases)
+    warnings = await deps.ValidationService.validate_cases(db, cases)
 
     yield {"type": "progress", "stage": "reviewing", "message": "测试专家正在分模块并行评审用例..."}
     warnings_by_global = {
         w["case_index"]: w for w in warnings if isinstance(w.get("case_index"), int)
     }
     reviews: list[dict] = []
-    gaps: list = []
+    gaps: list[str] = []
     async for ev in _parallel_agents(
         _group_by_module(cases),
         lambda i, g, emit: _review_worker(i, g, emit, ctx.base_system, warnings_by_global),
@@ -151,7 +193,7 @@ async def _review_worker(idx: int, group: dict, emit, system: str,
             await emit("thinking", {"text": text})
 
     parts: list[str] = []
-    llm = _gs.LLMService()
+    llm = deps.LLMService()
     with token_usage.stage(token_usage.STAGE_REVIEW):
         async for piece in llm.generate_stream(system, _review_prompt(local_cases, local_warnings),
                                                on_reasoning=on_reasoning):
@@ -185,10 +227,13 @@ async def _review_worker(idx: int, group: dict, emit, system: str,
     if unusable:
         # 模型自己数错 #编号（越界）或漏了 index 字段时，此前是静默丢弃，等于判定白做。
         logger.warning("评审[%s]有 %d 条判定的 index 缺失或越界，已忽略", group["module"], unusable)
-    gaps: list = []
+    gaps: list[str] = []
     if isinstance(parsed, dict):
         raw_gaps = parsed.get("gaps", [])
-        gaps = raw_gaps if isinstance(raw_gaps, list) else []
+        # 归一成 str：gaps 直接来自 LLM 的 JSON，模型偶尔会吐 {"scene": ...} 这类对象。
+        # 下游只把它拼进补充 prompt（f-string 本就会 str()），所以转换后文本逐字不变，
+        # 但类型标注从此是真的，调用方不必再猜。
+        gaps = [str(g) for g in raw_gaps] if isinstance(raw_gaps, list) else []
     deleted = sum(1 for r in reviews if r.get("verdict") == "delete")
     summary = {"kept": len(items) - deleted, "deleted": deleted}
     if truncated:

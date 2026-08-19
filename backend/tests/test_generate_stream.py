@@ -1,4 +1,4 @@
-"""generate_stream 全流程的事件序列回归测试（app/services/generator_service.py）。
+"""generate_stream 全流程的事件序列回归测试（app/services/pipeline_service.py 及各 stage 模块）。
 
 这条流水线有 5 个阶段、3 处并发 agent，吐出的事件名与字段是前端唯一的契约
 （stores/generation.ts 按 type 分派、按 index 归档到各 agent 卡片）。此前零测试覆盖，
@@ -7,12 +7,14 @@
 
 做法：只替换外部依赖（LLM / 知识库检索 / 校验），PromptService、分组、去重、归位排序
 全部跑真实实现。FakeLLM 按 prompt 内容分派到「模块拆分 / 生成 / 评审 / 补充」四种响应。
+替换点在 pipeline_deps（依赖注入接缝）与 pipeline_context._get_historical_cases，
+不是 generator_service——后者只是单向 re-export 的薄壳，替它不生效。
 
 确定性：把 LLM_MODULE_STAGGER_DELAY 归零，且 FakeLLM 的 async generator 内不含真正会挂起
 的 await（无界 Queue 的 put/get 与未满的 Semaphore 都不让出事件循环），于是每个 worker
 被调度后一口气跑完，事件严格按下标顺序进队列。
 
-需要 chromadb：generator_service 顶部 import ChromaStore（原因见 test_llm_parsing 文件头），
+需要 chromadb：pipeline_context_service 顶部 import ChromaStore（原因见 test_llm_parsing 文件头），
 只装 pytest 的环境下本文件整体跳过。
 """
 import asyncio
@@ -21,10 +23,13 @@ import re
 
 import pytest
 
-pytest.importorskip("chromadb", reason="generator_service 顶部 import ChromaStore")
-pytest.importorskip("sqlalchemy", reason="generator_service 依赖 AsyncSession 类型标注")
+pytest.importorskip("chromadb", reason="pipeline_context_service 顶部 import ChromaStore")
+pytest.importorskip("sqlalchemy", reason="流水线依赖 AsyncSession 类型标注")
 
-from app.services import generator_service as gs  # noqa: E402
+from app.config import settings  # noqa: E402
+from app.services import pipeline_deps as deps  # noqa: E402
+from app.services import pipeline_context_service as pipeline_context  # noqa: E402
+from app.services.pipeline_service import GeneratorService  # noqa: E402
 
 RETRIEVAL = {
     "query_keywords": ["登录"],
@@ -83,23 +88,29 @@ async def _async(value):
 
 
 def _install(monkeypatch, handler, *, warnings=None, split=True):
-    """把外部依赖换成假实现，并让并发不错峰、小需求也走模块拆分。"""
+    """把外部依赖换成假实现，并让并发不错峰、小需求也走模块拆分。
+
+    LLM/检索/校验都替在 pipeline_deps 上——各 stage 模块通过 `deps.X` 在调用时查属性，
+    所以替这里全流水线生效；_get_historical_cases 替在它的定义模块
+    pipeline_context_service 上（本文件以别名 pipeline_context 引入），
+    generate_stream 与 clarify 两条路径都会走到。
+    """
     monkeypatch.setattr(FakeLLM, "handler", staticmethod(handler))
-    monkeypatch.setattr(gs, "LLMService", FakeLLM)
-    monkeypatch.setattr(gs.RetrievalService, "retrieve",
+    monkeypatch.setattr(deps, "LLMService", FakeLLM)
+    monkeypatch.setattr(deps.RetrievalService, "retrieve",
                         lambda db, text, kb_ids=None: _async(dict(RETRIEVAL)))
-    monkeypatch.setattr(gs, "_get_historical_cases",
+    monkeypatch.setattr(pipeline_context, "_get_historical_cases",
                         lambda text, keywords, kb_ids=None: _async([]))
-    monkeypatch.setattr(gs.ValidationService, "validate_cases",
+    monkeypatch.setattr(deps.ValidationService, "validate_cases",
                         lambda db, cases: _async(list(warnings or [])))
-    monkeypatch.setattr(gs.settings, "LLM_MODULE_STAGGER_DELAY", 0.0)
-    monkeypatch.setattr(gs.settings, "LLM_ENABLE_MODULE_SPLIT", split)
-    monkeypatch.setattr(gs.settings, "LLM_MODULE_SPLIT_MIN_CHARS", 10)
+    monkeypatch.setattr(settings, "LLM_MODULE_STAGGER_DELAY", 0.0)
+    monkeypatch.setattr(settings, "LLM_ENABLE_MODULE_SPLIT", split)
+    monkeypatch.setattr(settings, "LLM_MODULE_SPLIT_MIN_CHARS", 10)
 
 
 def _collect(requirement_text: str = "需求：登录与订单管理，需覆盖两个模块。") -> list[dict]:
     async def run():
-        return [ev async for ev in gs.GeneratorService.generate_stream(None, requirement_text)]
+        return [ev async for ev in GeneratorService.generate_stream(None, requirement_text)]
     return asyncio.run(run())
 
 

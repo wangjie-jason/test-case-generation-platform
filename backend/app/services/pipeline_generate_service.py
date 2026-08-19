@@ -8,12 +8,11 @@ import logging
 from typing import AsyncGenerator
 
 from app.config import settings
-import app.services.generator_service as _gs  # late-bound: tests monkeypatch gs.LLMService
+from app.services import pipeline_deps as deps
 from app.services.prompt_service import PromptService
-from app.services.pipeline_context import (
+from app.services.pipeline_context_service import (
     _Context,
     _dedup_by_title,
-    _has_valid_cases,
     _parallel_agents,
     _prompt_kwargs,
     _title_key,
@@ -60,7 +59,7 @@ async def _extract_modules(llm, requirement_text: str, prd_chunks: list[dict] | 
 
 async def _stage_generate(ctx: _Context) -> AsyncGenerator[dict, None]:
     """阶段①：模块拆分（可选）→ 分模块并行生成 / 单批生成 → 跨批去重。_results 回传用例列表。"""
-    llm = _gs.LLMService()
+    llm = deps.LLMService()
     # 仅在 LLM_ENABLE_MODULE_SPLIT 开启、且需求文本足够长时才抽取模块清单。
     # 小需求（< LLM_MODULE_SPLIT_MIN_CHARS）跳过：单批生成本就撑不满 max_tokens，
     # 抽模块只会白花一次 LLM 调用；且续写式兜底始终生效，跳过不影响防截断。
@@ -138,7 +137,7 @@ async def _module_worker(idx: int, item: dict, emit, ctx: _Context) -> tuple[lis
         # 思考流用独立事件类型，前端在思考阶段展示 🤔 思考中，避免干等"等待模型输出"。
         await emit("thinking", {"text": text})
 
-    batch = await _generate_one_batch(_gs.LLMService(), ctx, module_focus=module, existing_titles=[],
+    batch = await _generate_one_batch(deps.LLMService(), ctx, module_focus=module, existing_titles=[],
                                       on_chunk=on_chunk, on_reasoning=on_reasoning)
     # 回传给上层的 batch 可能是一条无 title 的 `{"error": 原因}` 占位（本模块一条都没解析出来），
     # 它只用于「全部模块都空」时向用户解释原因；下发前端的 cases 必须剔掉它，否则卡片会
@@ -157,6 +156,8 @@ async def _generate_one_batch(
     循环到 finish_reason != length 或达到 LLM_MAX_CONTINUATIONS 上限。
 
     module_focus 非空时按该模块聚焦生成，为 None 则是不分模块的单批。
+    existing_titles 会被**就地追加**本批新生成的 title（供续写防重复），调用方传进来的
+    列表会被改动——续写轮依赖这份累积状态，不是可省略的实现细节。
     on_chunk 非空时，每收到一段流式文本就以其为参数调用（可为 async），供上层按模块
     实时展示该 agent 的输出流。
 

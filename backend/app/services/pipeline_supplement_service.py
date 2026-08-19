@@ -6,8 +6,8 @@
 import logging
 from typing import AsyncGenerator
 
-import app.services.generator_service as _gs  # late-bound: tests monkeypatch gs.LLMService
-from app.services.pipeline_context import (
+from app.services import pipeline_deps as deps
+from app.services.pipeline_context_service import (
     _Context,
     _parallel_agents,
     _title_key,
@@ -81,7 +81,7 @@ async def _supplement_worker(idx: int, item: dict, emit, system: str,
     parts: list[str] = []
     prompt = _supplement_prompt(kept, item.get("deleted", []), item.get("gaps", []))
     with token_usage.stage(token_usage.STAGE_SUPPLEMENT):
-        async for piece in _gs.LLMService().generate_stream(system, prompt, on_reasoning=on_reasoning):
+        async for piece in deps.LLMService().generate_stream(system, prompt, on_reasoning=on_reasoning):
             parts.append(piece)
             if piece:
                 await emit("chunk", {"text": piece})

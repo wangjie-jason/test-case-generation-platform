@@ -1,29 +1,31 @@
 """生成流水线的共享上下文与工具。
 
-集中放一次生成里所有阶段都会用到的小工具：
+集中放**多个** stage 模块都会用到的小工具：
 - _Context：阶段间共享的检索结果与 prompt 上下文 dataclass
 - _build_context：跑一次检索 + 历史用例 + 基础 system prompt
 - _prompt_kwargs：把检索结果摊平给 PromptService 的入参
 - _knowledge_matches / _pick / _clip_value / _clip_text：推给前端的命中知识脱敏
 - _get_historical_cases：历史用例的少量检索
 - _has_valid_cases：是否有至少一条有效用例
-- _title_key / _dedup_by_title：跨批去重
-- _case_brief / _review_prompt：评审 prompt 构造
-- _parallel_agents：通用「多 agent 并行 + 单点汇流」运行器（评审/补充共用）
+- _title_key / _dedup_by_title：title 归一化与跨批去重
+- _parallel_agents：通用「多 agent 并行 + 单点汇流」运行器（生成/评审/补充共用）
 
-放这里是因为各 stage 模块都会复用，但放 stage 文件里会造成循环引用。
+判据是「≥2 个 stage 复用」：只服务单一阶段的东西一律放回该阶段自己的模块，
+免得这里退化成 utils 垃圾桶——评审 prompt（_review_prompt / _case_brief）因此已挪回
+pipeline_review_service，与 pipeline_supplement_service 自带 _supplement_prompt 的摆法对齐。
 """
 import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.services import pipeline_deps as deps
 from app.services.prompt_service import PromptService
 from app.vectorstore.chroma_client import ChromaStore
-import app.services.generator_service as _gs  # late-bound: tests monkeypatch gs.LLMService / gs._get_historical_cases
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +63,8 @@ def _prompt_kwargs(requirement_text: str, retrieval: dict, historical_cases: lis
 async def _build_context(db: AsyncSession, requirement_text: str,
                          kb_ids: list[str] | None) -> _Context:
     """检索知识库 + 历史用例，顺带算好推给前端的命中统计与明细。"""
-    retrieval = await _gs.RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)
-    historical_cases = await _gs._get_historical_cases(requirement_text, retrieval["query_keywords"], kb_ids)
+    retrieval = await deps.RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)
+    historical_cases = await _get_historical_cases(requirement_text, retrieval["query_keywords"], kb_ids)
     base_system, _ = PromptService.build(**_prompt_kwargs(requirement_text, retrieval, historical_cases))
     return _Context(
         requirement_text=requirement_text,
@@ -103,7 +105,7 @@ def _pick(item: dict, fields: list[str]) -> dict:
     return result
 
 
-def _clip_value(value):
+def _clip_value(value: Any) -> Any:
     if not isinstance(value, str):
         return value
     return value[:160]
@@ -166,49 +168,6 @@ def _dedup_by_title(cases: list[dict]) -> list[dict]:
         seen.add(key)
         result.append(c)
     return result
-
-
-def _case_brief(case: dict, idx: int) -> str:
-    """评审用：把一条用例压缩成简短文本，带序号。"""
-    steps = case.get("steps", "")
-    if isinstance(steps, list):
-        steps = "; ".join(str(s) for s in steps)
-    return (
-        f"#{idx} 【{case.get('priority', '')}】{case.get('title', '')}\n"
-        f"   前置：{(case.get('precondition') or '')[:80]}\n"
-        f"   步骤：{str(steps)[:160]}\n"
-        f"   预期：{(case.get('expected_result') or '')[:120]}"
-    )
-
-
-def _review_prompt(cases: list[dict], warnings: list[dict]) -> str:
-    briefs = "\n".join(_case_brief(c, i) for i, c in enumerate(cases))
-    warn_text = ""
-    if warnings:
-        wt = "\n".join(f"- #{w['case_index']} {'; '.join(w['warnings'])}" for w in warnings[:10])
-        warn_text = f"\n\n## 自动校验已发现的问题（供参考）\n{wt}"
-    return f"""你现在是测试评审专家。请逐条评审下面已生成的测试用例，挑出其中**应当删除**的。
-
-删除标准（满足任一即删）：
-- 引用了不存在的字段/规则，或预期结果违反业务规则
-- 与其它用例完全重复
-- 步骤或预期含糊、不可执行、自相矛盾
-- 明显偏离需求
-
-注意：不要改写用例内容，只做删除判断。同时指出整体上还遗漏了哪些应覆盖但当前没有的场景。
-
-## 待评审用例（共 {len(cases)} 条）
-{briefs}{warn_text}
-
-**只列出要删除的用例**，判定保留的一律不要输出——未列出的自动视为保留。逐条输出 keep
-会让响应长度随用例数线性膨胀、撑满 token 上限，一旦被截断，后面所有判定都会丢失。
-index 必须照抄上面每条用例前的 #编号，不要自己重新数。
-
-只输出如下 JSON（不要 markdown 代码块）：
-{{
-  "reviews": [{{"index": <用例序号>, "verdict": "delete", "reason": "<简短理由>"}}],
-  "gaps": ["<遗漏场景1>", "<遗漏场景2>"]
-}}"""
 
 
 async def _parallel_agents(items: list[dict], worker_factory, phase: str):

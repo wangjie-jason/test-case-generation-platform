@@ -8,32 +8,30 @@
 回传阶段产物。本模块只负责串阶段、转发事件、做阶段间判定，不掺任何阶段内部细节。
 
 实际各阶段逻辑在同目录的 stage 模块里：
-- pipeline_context    共享上下文（_Context、检索、prompt 助手、并发运行器等）
-- pipeline_generate   阶段①：模块拆分 + 分模块/单批生成 + 跨批去重
-- pipeline_review     阶段②：自动校验 + 分模块并行评审
-- pipeline_supplement 阶段③：按模块/遗漏场景并行补充
+- pipeline_deps       外部依赖接缝（LLM/检索/校验的注入点，测试在此换实现）
+- pipeline_context_service    共享上下文（_Context、检索、prompt 助手、并发运行器等）
+- pipeline_generate_service   阶段①：模块拆分 + 分模块/单批生成 + 跨批去重
+- pipeline_review_service     阶段②：自动校验 + 分模块并行评审
+- pipeline_supplement_service 阶段③：按模块/遗漏场景并行补充
 """
-import logging
 import time
 from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import app.services.generator_service as _gs  # late-bound: tests monkeypatch gs.LLMService / gs.RetrievalService
-from app.services.pipeline_context import (
+from app.services import pipeline_context_service
+from app.services import pipeline_deps as deps
+from app.services.pipeline_context_service import (
     _build_context,
-    _get_historical_cases,
     _has_valid_cases,
     _prompt_kwargs,
 )
-from app.services.pipeline_generate import _stage_generate
-from app.services.pipeline_review import _stage_review
-from app.services.pipeline_supplement import _stage_supplement
+from app.services.pipeline_generate_service import _stage_generate
+from app.services.pipeline_review_service import _stage_review
+from app.services.pipeline_supplement_service import _stage_supplement
 from app.services.prompt_service import PromptService
 from app.utils import token_usage
 from app.utils.case_ordering import order_cases
-
-logger = logging.getLogger(__name__)
 
 
 class GeneratorService:
@@ -42,13 +40,17 @@ class GeneratorService:
     async def clarify(db: AsyncSession, requirement_text: str, kb_ids: list[str] | None = None) -> str:
         """基于知识库补全（澄清）需求：检索 → LLM 补全 → 返回 Markdown 文本。
         不生成测试用例，只产出结构化的完整需求说明。"""
-        retrieval = await _gs.RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)
-        historical_cases = await _get_historical_cases(requirement_text, retrieval["query_keywords"], kb_ids)
+        retrieval = await deps.RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)
+        # 走模块属性而非 from-import：与 _build_context 保持同一个可替换接缝，否则测试
+        # 替掉 pipeline_context_service._get_historical_cases 时只有 generate_stream 生效、
+        # clarify 静默用真实实现（拆分前两者同在一个模块，不存在这个缺口）。
+        historical_cases = await pipeline_context_service._get_historical_cases(
+            requirement_text, retrieval["query_keywords"], kb_ids)
         system_content, user_content = PromptService.build_clarify(
             **_prompt_kwargs(requirement_text, retrieval, historical_cases)
         )
         with token_usage.stage(token_usage.STAGE_CLARIFY):
-            return await _gs.LLMService().generate(system_content, user_content)
+            return await deps.LLMService().generate(system_content, user_content)
 
     @staticmethod
     async def generate_stream(db: AsyncSession, requirement_text: str, kb_ids: list[str] | None = None) -> AsyncGenerator[dict, None]:
@@ -91,7 +93,7 @@ class GeneratorService:
         all_cases = [c for c in all_cases if not c.get("error")]
 
         deleted: list[dict] = []
-        gaps: list = []
+        gaps: list[str] = []
         async for ev in _stage_review(db, ctx, all_cases):
             if ev["type"] == "_results":
                 all_cases, deleted, gaps = ev["results"]
