@@ -70,5 +70,21 @@ class Settings(BaseSettings):
 
     model_config = {"env_file": str(_ENV_PATH), "env_file_encoding": "utf-8"}
 
+    @property
+    def SYNC_DATABASE_URL(self) -> str:
+        """同步版 DATABASE_URL，供 Alembic 使用（迁移走同步驱动）。
+
+        按驱动名做映射而不是把 "+aiosqlite" 直接删掉：后者只对 sqlite 凑巧成立，
+        换成 postgresql+asyncpg 时 replace 什么都没换，Alembic 会拿到异步 URL 直接报错。
+        """
+        for async_driver, sync_driver in (
+            ("+aiosqlite", "+pysqlite"),
+            ("+asyncpg", "+psycopg"),
+            ("+aiomysql", "+pymysql"),
+        ):
+            if async_driver in self.DATABASE_URL:
+                return self.DATABASE_URL.replace(async_driver, sync_driver)
+        return self.DATABASE_URL
+
 
 settings = Settings()

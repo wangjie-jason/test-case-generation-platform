@@ -1,5 +1,17 @@
-"""move legacy startup migrations into Alembic."""
+"""move legacy startup migrations into Alembic.
 
+只对**改造前就存在的老库**有实际作用：那些库由旧 init_db 的 _migrate_* 逐个补列，
+补到哪一步取决于它最后一次启动的版本，故这里逐列判断存在性再补。
+
+新库不会走到任何一条分支——0001 已把这些列写进建表语句。留着它是为了让老库有一条
+可走的升级路径，不是冗余。
+
+老库首次接入 Alembic 需要先打标记，否则 0001 会去 CREATE TABLE 已存在的表而报错
+（0001 改成显式建表后不再有 create_all 那种「表已存在就整表跳过」的静默行为）：
+    alembic stamp 0001_initial_schema   # 声明「建表那步老库早就做过了」
+    alembic upgrade head                # 只跑 0002 补列
+新库直接 `alembic upgrade head` 即可。
+"""
 from alembic import op
 from sqlalchemy import inspect, text
 

@@ -59,11 +59,13 @@ npm install
 
 ```bash
 # 终端 1 - 后端（在项目根目录激活 venv，再进 backend 启动）
-source venv/bin/activate && cd backend && alembic upgrade head && uvicorn app.main:app --port 8000
+source venv/bin/activate && cd backend && uvicorn app.main:app --port 8000
 
 # 终端 2 - 前端
 cd frontend && npm run dev
 ```
+
+数据库结构由 Alembic 管理，启动时自动迁移（新库建表、老库自动识别并补列），无需手工执行任何命令。
 
 打开 http://localhost:3000
 
