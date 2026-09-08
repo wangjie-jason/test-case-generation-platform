@@ -7,6 +7,7 @@ import pdfplumber
 from docx import Document as DocxDocument
 
 from app.config import settings
+from app.utils.docx_blocks import render_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -43,19 +44,10 @@ class ParserService:
     @staticmethod
     async def _parse_docx(content: bytes) -> str:
         doc = DocxDocument(BytesIO(content))
-        parts = []
+        parts: list[str] = []
 
-        # 提取段落文本。
-        for para in doc.paragraphs:
-            if para.text.strip():
-                parts.append(para.text)
-
-        # 提取表格文本。
-        for table in doc.tables:
-            for row in table.rows:
-                cells = [cell.text for cell in row.cells if cell.text.strip()]
-                if cells:
-                    parts.append(" | ".join(cells))
+        # 按文档顺序提取段落与表格，并递归下钻单元格内嵌套的表格（见 docx_blocks 模块注释）。
+        render_blocks(doc.element.body, doc, parts)
 
         # 通过多模态 LLM 提取并描述图片内容。
         image_descriptions = await ParserService._extract_images(doc)
