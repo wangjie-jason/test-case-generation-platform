@@ -6,6 +6,7 @@ import type { KnowledgeBase } from '@/types/project'
 export const kbApi = {
   list() { return client.get<any, KnowledgeBase[]>("/knowledge-bases") },
   create(data: { name: string; description?: string }) { return client.post<any, KnowledgeBase>('/knowledge-bases', data) },
+  update(id: string, data: { name?: string; description?: string | null }) { return client.put<any, KnowledgeBase>(`/knowledge-bases/${id}`, data) },
   delete(id: string) { return client.delete(`/knowledge-bases/${id}`) },
 }
 

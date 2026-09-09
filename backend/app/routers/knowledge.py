@@ -23,7 +23,7 @@ from app.schemas.knowledge import (
     TermMappingResponse,
     TermMappingUpdate,
 )
-from app.schemas.project import KnowledgeBaseCreate, KnowledgeBaseResponse
+from app.schemas.project import KnowledgeBaseCreate, KnowledgeBaseResponse, KnowledgeBaseUpdate
 from app.services.knowledge_service import KnowledgeService
 from app.services.parser_service import ParserService
 from app.services.excel_service import ExcelImportService
@@ -45,6 +45,15 @@ async def create_kb(data: KnowledgeBaseCreate, db: AsyncSession = Depends(get_db
 async def list_kbs(db: AsyncSession = Depends(get_db)):
     r = await db.execute(select(KnowledgeBase).order_by(KnowledgeBase.created_at.desc()))
     return r.scalars().all()
+
+@router.put("/knowledge-bases/{kb_id}", response_model=KnowledgeBaseResponse)
+async def update_kb(kb_id: str, data: KnowledgeBaseUpdate, db: AsyncSession = Depends(get_db)):
+    kb = await db.get(KnowledgeBase, kb_id)
+    if not kb: raise HTTPException(404, "知识库不存在")
+    # exclude_unset：只更新提交的字段；description 显式传 None 表示清空（字段可空）。
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(kb, field, value)
+    await db.commit(); await db.refresh(kb); return kb
 
 @router.delete("/knowledge-bases/{kb_id}")
 async def delete_kb(kb_id: str, db: AsyncSession = Depends(get_db)):

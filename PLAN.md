@@ -14,7 +14,7 @@
 ## 已完成功能清单
 | 模块           | 功能                                                                                       | 状态 |
 | -------------- | ------------------------------------------------------------------------------------------ | ---- |
-| 知识库         | 创建/删除知识库，7种知识类型管理，Excel批量导入                                            | ✓    |
+| 知识库         | 创建/编辑（名称+描述）/删除知识库，7种知识类型管理，Excel批量导入                           | ✓    |
 | 用例生成       | PRD上传解析 + 文本输入，知识库选择，AI生成+评审补充                                        | ✓    |
 | 审核标注       | 按批次分组，逐条通过/拒绝，幻觉归因(5种)，Tab筛选                                          | ✓    |
 | 统计分析       | 用例数/可用率/幻觉分布/批次统计，看板                                                      | ✓    |
@@ -112,7 +112,7 @@
 ### 当前已实现 API
 
 #### 知识库
-- `GET/POST /knowledge-bases`, `DELETE /knowledge-bases/{kb_id}`
+- `GET/POST /knowledge-bases`, `PUT /knowledge-bases/{kb_id}`, `DELETE /knowledge-bases/{kb_id}`
 - `GET/POST /knowledge-bases/{kb_id}/field-dicts`, `PUT/DELETE /knowledge-bases/{kb_id}/field-dicts/{item_id}`
 - `GET/POST /knowledge-bases/{kb_id}/business-rules`, `PUT/DELETE /knowledge-bases/{kb_id}/business-rules/{item_id}`
 - `GET/POST /knowledge-bases/{kb_id}/state-machines`, `PUT/DELETE /knowledge-bases/{kb_id}/state-machines/{item_id}`
