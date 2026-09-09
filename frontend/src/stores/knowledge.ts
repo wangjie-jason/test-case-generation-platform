@@ -13,6 +13,12 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
 
   async function fetchKbs() { kbs.value = await kbApi.list() }
   async function createKb(data: { name: string; description?: string }) { const kb = await kbApi.create(data); kbs.value.push(kb); return kb }
+  async function updateKb(id: string, data: { name?: string; description?: string | null }) {
+    const updated = await kbApi.update(id, data)
+    const i = kbs.value.findIndex(k => k.id === id)
+    if (i >= 0) kbs.value[i] = updated
+    return updated
+  }
   async function deleteKb(id: string) { await kbApi.delete(id); kbs.value = kbs.value.filter(k => k.id !== id) }
 
   function clearDetails() {
@@ -36,7 +42,7 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
 
   return {
     kbs, fieldDicts, businessRules, stateMachines, termMappings, prdDocuments, defectRecords, loadingDetails,
-    fetchKbs, createKb, deleteKb, clearDetails, _fetch,
+    fetchKbs, createKb, updateKb, deleteKb, clearDetails, _fetch,
     createFieldDict: (kbId: string, d: Partial<FieldDict>) => fieldDictApi.create(kbId, d).then(() => _fetch(kbId)),
     updateFieldDict: (kbId: string, id: string, d: Partial<FieldDict>) => fieldDictApi.update(kbId, id, d).then(() => _fetch(kbId)),
     deleteFieldDict: (kbId: string, id: string) => fieldDictApi.delete(kbId, id).then(() => _fetch(kbId)),

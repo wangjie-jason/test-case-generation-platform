@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useKnowledgeStore } from '@/stores/knowledge'
+import type { KnowledgeBase } from '@/types/project'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import FieldDictTable from '@/components/knowledge/FieldDictTable.vue'
 import BusinessRuleTable from '@/components/knowledge/BusinessRuleTable.vue'
@@ -13,8 +14,11 @@ const store = useKnowledgeStore()
 const selectedKbId = ref<string | null>(null)
 const selectedKbName = ref('')
 const activeTab = ref('prd-docs')
-const createDialog = ref(false)
-const newKbName = ref('')
+const formVisible = ref(false)
+const formMode = ref<'create' | 'edit'>('create')
+const editingId = ref<string | null>(null)
+const formName = ref('')
+const formDesc = ref('')
 
 const tabs = [
   { name: 'prd-docs', label: 'PRD文档' }, { name: 'defects', label: '缺陷记录' },
@@ -24,12 +28,31 @@ const tabs = [
 
 onMounted(() => store.fetchKbs())
 
-async function handleCreateKb() {
-  if (!newKbName.value.trim()) return
-  const kb = await store.createKb({ name: newKbName.value })
-  createDialog.value = false; newKbName.value = ''
-  selectKb(kb.id, kb.name)
-  ElMessage.success('知识库创建成功')
+function openCreate() {
+  formMode.value = 'create'; editingId.value = null
+  formName.value = ''; formDesc.value = ''
+  formVisible.value = true
+}
+
+function openEdit(kb: KnowledgeBase) {
+  formMode.value = 'edit'; editingId.value = kb.id
+  formName.value = kb.name; formDesc.value = kb.description ?? ''
+  formVisible.value = true
+}
+
+async function handleSubmit() {
+  const name = formName.value.trim()
+  if (!name) return
+  const description = formDesc.value.trim()
+  if (formMode.value === 'edit' && editingId.value) {
+    await store.updateKb(editingId.value, { name, description: description || null })
+    ElMessage.success('知识库已更新')
+  } else {
+    const kb = await store.createKb({ name, description: description || undefined })
+    selectKb(kb.id, kb.name)
+    ElMessage.success('知识库创建成功')
+  }
+  formVisible.value = false; formName.value = ''; formDesc.value = ''
 }
 
 async function handleDeleteKb(id: string) {
@@ -50,13 +73,16 @@ async function selectKb(id: string, name: string) {
   <div class="kb-view">
     <!-- 知识库列表 -->
     <template v-if="!selectedKbId">
-      <div class="kb-header"><h2>知识库</h2><el-button type="primary" @click="createDialog = true">+ 新建知识库</el-button></div>
+      <div class="kb-header"><h2>知识库</h2><el-button type="primary" @click="openCreate">+ 新建知识库</el-button></div>
       <el-row :gutter="16" v-if="store.kbs.length">
         <el-col v-for="kb in store.kbs" :key="kb.id" :span="8">
           <el-card shadow="hover" class="kb-card" @click="selectKb(kb.id, kb.name)">
             <div class="kb-card-header">
               <span class="kb-card-name">{{ kb.name }}</span>
-              <el-button type="danger" link @click.stop="handleDeleteKb(kb.id)"><el-icon><Delete /></el-icon></el-button>
+              <span class="kb-card-actions">
+                <el-button type="primary" link @click.stop="openEdit(kb)"><el-icon><Edit /></el-icon></el-button>
+                <el-button type="danger" link @click.stop="handleDeleteKb(kb.id)"><el-icon><Delete /></el-icon></el-button>
+              </span>
             </div>
             <div class="kb-card-desc">{{ kb.description || '暂无描述' }}</div>
             <div class="kb-card-meta">{{ kb.created_at?.slice(0, 10) }}</div>
@@ -86,11 +112,12 @@ async function selectKb(id: string, name: string) {
       </template>
     </template>
 
-    <el-dialog v-model="createDialog" title="新建知识库" width="420px">
-      <el-form @submit.prevent="handleCreateKb">
-        <el-form-item label="名称" required><el-input v-model="newKbName" placeholder="如 实时视频监控" /></el-form-item>
+    <el-dialog v-model="formVisible" :title="formMode === 'create' ? '新建知识库' : '编辑知识库'" width="420px">
+      <el-form @submit.prevent="handleSubmit">
+        <el-form-item label="名称" required><el-input v-model="formName" placeholder="如 实时视频监控" /></el-form-item>
+        <el-form-item label="描述"><el-input v-model="formDesc" type="textarea" :rows="3" maxlength="1000" show-word-limit placeholder="这个知识库用来做什么（选填）" /></el-form-item>
       </el-form>
-      <template #footer><el-button @click="createDialog = false">取消</el-button><el-button type="primary" @click="handleCreateKb">创建</el-button></template>
+      <template #footer><el-button @click="formVisible = false">取消</el-button><el-button type="primary" @click="handleSubmit">{{ formMode === 'create' ? '创建' : '保存' }}</el-button></template>
     </el-dialog>
   </div>
 </template>
@@ -101,6 +128,7 @@ async function selectKb(id: string, name: string) {
 .kb-card { cursor: pointer; margin-bottom: 16px; min-height: 120px; }
 .kb-card:hover { border-color: #409EFF; }
 .kb-card-header { display: flex; justify-content: space-between; align-items: center; }
+.kb-card-actions { display: flex; align-items: center; gap: 4px; }
 .kb-card-name { font-size: 16px; font-weight: 600; }
 .kb-card-desc { margin-top: 8px; color: #909399; font-size: 13px; }
 .kb-card-meta { margin-top: 12px; font-size: 12px; color: #c0c4cc; }
