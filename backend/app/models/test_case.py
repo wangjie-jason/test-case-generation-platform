@@ -26,6 +26,9 @@ class TestCase(Base):
     quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     knowledge_refs: Mapped[str | None] = mapped_column(Text, nullable=True)
     batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # 归属者 users.id（裸列不加 FK，与 batch_id 同风格）。批次为个人私有，查询一律
+    # WHERE owner_id=:me，老数据迁移后归首个管理员；NULL 对任何用户都不可见（fail-closed）。
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     req_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 审核阶段允许人工微调 title/precondition/steps/expected_result；覆盖原文，同时打个标，
     # 用来在统计里区分「AI 直接可用」和「AI+人工微调后可用」，不污染首发通过率。

@@ -1,9 +1,17 @@
 import axios from 'axios'
 import type { AxiosResponse } from 'axios'
+import { getToken, redirectToLogin } from '@/utils/authToken'
 
 const client = axios.create({
   baseURL: '/api/v1',
   timeout: 60000,
+})
+
+// 所有请求自动带上登录 token。
+client.interceptors.request.use((config) => {
+  const token = getToken()
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
 })
 
 // FastAPI 的 detail 有三种形态：业务异常抛的字符串、Pydantic 校验失败的数组
@@ -34,6 +42,12 @@ client.interceptors.response.use(
     return data.data ?? data
   },
   (error) => {
+    const status = error.response?.status
+    const url: string = error.config?.url ?? ''
+    // 401 统一登出跳登录页；登录接口自身的 401（用户名/密码错）除外，否则会循环跳转。
+    if (status === 401 && !url.includes('/auth/login')) {
+      redirectToLogin()
+    }
     const message = normalizeDetail(error.response?.data?.detail) || error.message || '网络错误'
     return Promise.reject(new Error(message))
   }
