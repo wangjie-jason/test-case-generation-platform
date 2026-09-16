@@ -17,12 +17,16 @@ from app.schemas.generation import (
     ReviewCaseRequest,
     UpdateCaseRequest,
 )
-from app.services import usage_service
+from app.models.user import User
+from app.routers.deps import get_current_user
+from app.services import llm_credential_service, usage_service
 from app.services.excel_service import ExcelExportService
 from app.services.pipeline_service import GeneratorService
 from app.services.llm_service import LLMServiceError
 from app.services.parser_service import ParserService
 from app.services.task_service import TaskManager
+from app.utils import llm_credentials
+from app.utils.llm_credentials import CredentialNotConfiguredError
 
 router = APIRouter()
 
@@ -81,46 +85,61 @@ async def _resolve_insert_ts(db: AsyncSession, batch_id: str,
 
 
 @router.post("/generate/clarify")
-async def generate_clarify(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
+async def generate_clarify(
+    body: GenerateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """基于知识库补全需求：返回结构化的完整需求说明（Markdown），供用户确认/编辑后再生成用例。"""
+    try:
+        creds = await llm_credential_service.resolve_credentials(db, user.id)
+    except CredentialNotConfiguredError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         # clarify 也要记账：它是一次完整的大 prompt 调用，不记的话看板上
         # 「累计」会明显小于账单。无批次归属，流水的 batch_id 留 NULL。
-        with usage_service.collector() as usage_records:
+        with llm_credentials.bind(creds), usage_service.collector() as usage_records:
             try:
                 clarified = await GeneratorService.clarify(db, body.requirement_text, kb_ids=body.kb_ids if body.kb_ids else None)
             finally:
-                await usage_service.flush(db, usage_records)
+                await usage_service.flush(db, usage_records, owner_id=user.id)
     except LLMServiceError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return {"clarified_text": clarified}
 
 
 @router.post("/generate/async")
-async def generate_async(body: GenerateRequest):
+async def generate_async(
+    body: GenerateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """启动后台生成任务，立即返回 task_id。任务脱离本请求运行，
-    客户端断开/刷新后仍继续，可凭 task_id 重连观看实时进度。
-    body.client_id 作为归属者，实现多人/多浏览器隔离。"""
+    客户端断开/刷新后仍继续，可凭 task_id 重连观看实时进度。归属登录用户。"""
+    # 入口前置校验凭据：没配个人 key 也没有系统兜底时直接 400 引导，不建任务、不花钱。
+    try:
+        creds = await llm_credential_service.resolve_credentials(db, user.id)
+    except CredentialNotConfiguredError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     task = TaskManager.create(
         body.requirement_text, body.batch_name, body.kb_ids if body.kb_ids else None,
-        owner_id=body.client_id,
+        owner_id=user.id, creds=creds,
     )
     return task.summary()
 
 
 @router.get("/generate/active")
-async def generate_active(client_id: str | None = None):
-    """列出运行中的生成任务，供前端在刷新后提供「继续查看」入口。
-    传入 client_id 时只返回该浏览器/用户自己的任务，避免串到他人任务。"""
-    return [t.summary() for t in TaskManager.active(owner_id=client_id)]
+async def generate_active(user: User = Depends(get_current_user)):
+    """列出当前登录用户运行中的生成任务，供刷新后提供「继续查看」入口。"""
+    return [t.summary() for t in TaskManager.active(user.id)]
 
 
 @router.get("/generate/stream/{task_id}")
-async def generate_stream_reconnect(task_id: str):
+async def generate_stream_reconnect(task_id: str, user: User = Depends(get_current_user)):
     """订阅指定任务的事件流：先重放已产生的事件，再推送后续实时事件。
-    支持刷新页面后重连，断点续看。"""
+    支持刷新页面后重连，断点续看。只能订阅自己的任务，他人任务一律 404（不泄露存在性）。"""
     task = TaskManager.get(task_id)
-    if not task:
+    if not task or task.owner_id != user.id:
         raise HTTPException(404, "任务不存在或已过期")
 
     async def stream():
@@ -313,11 +332,19 @@ async def export_cases(data: ExportCasesRequest):
 
 
 @router.post("/parse-prd")
-async def parse_prd(file: UploadFile = File(...)):
+async def parse_prd(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename else "txt"
     if ext not in {"pdf", "docx", "md", "txt"}: raise HTTPException(400, f"不支持: {ext}")
     content = await file.read()
-    text = await ParserService.parse(file.filename or "未命名", content)
+    # 图片 OCR 走多模态模型：绑定当前用户凭据（个人优先、否则系统兜底）；都没配时
+    # 不挡上传，图片识别降级为提示文案。
+    creds = await llm_credential_service.resolve_credentials_optional(db, user.id)
+    with llm_credentials.bind(creds):
+        text = await ParserService.parse(file.filename or "未命名", content)
     return {"filename": file.filename, "format": ext, "text": text, "length": len(text)}
 
 

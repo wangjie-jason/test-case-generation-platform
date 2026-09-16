@@ -9,6 +9,8 @@ from app.services import usage_service
 from app.services.pipeline_service import GeneratorService
 from app.services.indexing_service import IndexingService
 from app.services.llm_service import LLMServiceError
+from app.utils import llm_credentials
+from app.utils.llm_credentials import CredentialNotConfiguredError, LLMCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +23,8 @@ _MAX_TASKS = 50
 _END = {"type": "__end__"}
 
 
-async def persist_cases(db, cases: list[dict], batch_name: str | None, requirement_text: str) -> str:
+async def persist_cases(db, cases: list[dict], batch_name: str | None, requirement_text: str,
+                        owner_id: str) -> str:
     """将生成的用例写入数据库，返回 batch_id。"""
     batch_id = str(_uuid.uuid4())
     # 同时保留源字典：提交后把数据库生成的用例 ID 回填到 SSE 的 complete
@@ -40,6 +43,7 @@ async def persist_cases(db, cases: list[dict], batch_name: str | None, requireme
             steps=steps, expected_result=c.get("expected_result", ""),
             priority=(c.get("priority") or None),
             source="ai", batch_id=batch_id, req_text=batch_name or requirement_text[:80],
+            owner_id=owner_id,
             knowledge_refs=json.dumps(c.get("knowledge_refs", []), ensure_ascii=False),
             # 评审后定向补充的用例带 origin='supplement'；生成阶段的不带该键，留 NULL。
             origin=c.get("origin"),
@@ -57,14 +61,17 @@ async def persist_cases(db, cases: list[dict], batch_name: str | None, requireme
 class GenerationTask:
     """一次后台生成任务。事件被缓存在 events 中，支持断线/刷新后重连重放。"""
 
-    def __init__(self, requirement_text: str, batch_name: str | None, kb_ids: list[str] | None, owner_id: str | None = None):
+    def __init__(self, requirement_text: str, batch_name: str | None, kb_ids: list[str] | None,
+                 owner_id: str, creds: LLMCredentials):
         self.id = str(_uuid.uuid4())
         self.requirement_text = requirement_text
         self.batch_name = batch_name
         self.kb_ids = kb_ids
-        # 归属者 ID：中立命名，当前来自前端 localStorage 的匿名 client_id，
-        # 将来引入登录账号时只需把来源换成 user.id，本类逻辑无需改动。
+        # 归属者 user.id；任务的历史批次按人隔离。
         self.owner_id = owner_id
+        # 创建任务时快照凭据：后台任务比 HTTP 请求长寿，不能在 worker 里依赖登录态；
+        # 在跑任务即使用户中途改了 key 也沿用这份，行为可预期。
+        self.creds = creds
         self.title = (batch_name or requirement_text or "").strip()[:40] or "未命名需求"
         self.created_at = now_local()
         self.status = "running"  # running | done | error
@@ -106,10 +113,13 @@ class TaskManager:
     _tasks: dict[str, GenerationTask] = {}
 
     @classmethod
-    def create(cls, requirement_text: str, batch_name: str | None, kb_ids: list[str] | None, owner_id: str | None = None) -> GenerationTask:
+    def create(cls, requirement_text: str, batch_name: str | None, kb_ids: list[str] | None,
+               owner_id: str, creds: LLMCredentials) -> GenerationTask:
         cls._prune()
-        task = GenerationTask(requirement_text, batch_name, kb_ids, owner_id)
+        task = GenerationTask(requirement_text, batch_name, kb_ids, owner_id, creds)
         cls._tasks[task.id] = task
+        # create_task 复制创建时的上下文，故在此（调用方已 bind 凭据的上下文里）
+        # 发起即可；_run 内部也会显式 bind 任务快照，双保险且不依赖调用时序。
         asyncio.create_task(cls._run(task))
         return task
 
@@ -118,12 +128,9 @@ class TaskManager:
         return cls._tasks.get(task_id)
 
     @classmethod
-    def active(cls, owner_id: str | None = None) -> list[GenerationTask]:
-        """返回运行中的任务（最近创建的在前），供前端提供「继续查看」入口。
-        传入 owner_id 时只返回该归属者的任务，实现多人/多浏览器隔离。"""
-        running = [t for t in cls._tasks.values() if t.status == "running"]
-        if owner_id is not None:
-            running = [t for t in running if t.owner_id == owner_id]
+    def active(cls, owner_id: str) -> list[GenerationTask]:
+        """返回该用户运行中的任务（最近创建的在前），供前端「继续查看」入口。"""
+        running = [t for t in cls._tasks.values() if t.status == "running" and t.owner_id == owner_id]
         return sorted(running, key=lambda t: t.created_at, reverse=True)
 
     @classmethod
@@ -134,22 +141,30 @@ class TaskManager:
         # 装晚了就收不到这些并发调用的用量。
         batch_id: str | None = None
         try:
-            with usage_service.collector() as usage_records:
+            # 凭据在最外层绑定（与 collector 同层）：之后 generate_stream 内所有
+            # create_task 起的并发 worker 都复制这份上下文，取到任务快照里的凭据。
+            with llm_credentials.bind(task.creds), usage_service.collector() as usage_records:
                 async with async_session() as db:
                     try:
                         async for event in GeneratorService.generate_stream(
                             db, task.requirement_text, kb_ids=task.kb_ids or None
                         ):
                             if event.get("type") == "complete":
-                                batch_id = await persist_cases(db, event.get("cases", []), task.batch_name, task.requirement_text)
+                                batch_id = await persist_cases(
+                                    db, event.get("cases", []), task.batch_name,
+                                    task.requirement_text, task.owner_id,
+                                )
                             task._emit(event)
                     finally:
                         # 无论成功、报错还是中途异常都要记账：token 已经花掉了，
                         # 失败的消耗更该被看见（尤其是撞限流前那几轮）。放在
                         # async_session 内层的 finally，保证 flush 时 db 仍可用。
                         # 生成失败时 batch_id 为 None，流水归入「未关联批次」。
-                        await usage_service.flush(db, usage_records, batch_id)
+                        await usage_service.flush(db, usage_records, batch_id, owner_id=task.owner_id)
             task.status = "done"
+        except CredentialNotConfiguredError as exc:
+            task._emit({"type": "error", "message": str(exc)})
+            task.status = "error"
         except LLMServiceError as exc:
             task._emit({"type": "error", "message": str(exc)})
             task.status = "error"

@@ -25,11 +25,12 @@ app = FastAPI(title="Test Case Generation Platform", version="0.5.0", lifespan=l
 
 # 开发走 Vite 同源代理、生产走前端容器 nginx 反代，没有跨域消费者，故不需要 CORS。
 
-from app.routers import admin_users, auth, generation, knowledge  # noqa: E402
+from app.routers import admin_users, auth, generation, knowledge, llm_config  # noqa: E402
 
 # 认证与用户管理接口自己挂依赖（login 必须公开）。
 app.include_router(auth.router, prefix="/api/v1", tags=["认证"])
 app.include_router(admin_users.router, prefix="/api/v1")
+app.include_router(llm_config.router, prefix="/api/v1")
 
 # 业务 router 全量强制登录：统一在 include 时挂依赖，新增端点天然受保护。
 _auth = [Depends(get_current_user)]

@@ -6,8 +6,8 @@ import httpx
 import pdfplumber
 from docx import Document as DocxDocument
 
-from app.config import settings
 from app.utils.docx_blocks import render_blocks
+from app.utils.llm_credentials import get_optional as get_llm_creds
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +84,10 @@ class ParserService:
 
     @staticmethod
     async def _describe_images(images: list[dict]) -> str:
-        """把图片发送给多模态 LLM 获取描述。"""
-        if not settings.LLM_API_KEY:
-            return "（未配置API Key，无法识别图片）"
+        """把图片发送给多模态 LLM 获取描述。凭据取当前上下文绑定的用户/兜底凭据。"""
+        creds = get_llm_creds()
+        if creds is None:
+            return "（未配置大模型凭据，无法识别图片）"
 
         # 构造包含文本和图片的多模态消息。
         content_parts = [{
@@ -103,13 +104,13 @@ class ParserService:
         try:
             async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
                 response = await client.post(
-                    f"{settings.LLM_BASE_URL}/chat/completions",
+                    f"{creds.base_url}/chat/completions",
                     headers={
-                        "Authorization": f"Bearer {settings.LLM_API_KEY}",
+                        "Authorization": f"Bearer {creds.api_key}",
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": settings.LLM_MODEL,
+                        "model": creds.model,
                         "messages": [{"role": "user", "content": content_parts}],
                         "max_tokens": 2048,
                     },

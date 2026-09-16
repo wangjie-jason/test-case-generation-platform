@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { onMounted, watch } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
+import { useRouter } from 'vue-router'
 import { useGenerationStore } from '@/stores/generation'
 import { generationApi, type CaseRecord } from '@/api/generation'
+import { llmConfigApi } from '@/api/llmConfig'
+import type { LlmConfigStatus } from '@/types/llmConfig'
 import { saveBlob } from '@/utils/saveBlob'
 import { useBatchList } from '@/composables/useBatchList'
 import { useKnowledgeMatches } from '@/composables/useKnowledgeMatches'
@@ -39,7 +42,14 @@ function cacheBatchItems(batchId: string, items: CaseRecord[]) {
   batchItems.value[batchId] = items
 }
 
-onMounted(() => { store.fetchKbs(); fetchBatches() })
+onMounted(() => { store.fetchKbs(); fetchBatches(); loadLlmStatus() })
+
+// 顶栏提示当前生效的模型来源（个人凭据/系统兜底）；两者都无时引导去设置页。
+const router = useRouter()
+const llmStatus = ref<LlmConfigStatus | null>(null)
+async function loadLlmStatus() {
+  try { llmStatus.value = await llmConfigApi.get() } catch { /* 401 拦截器会处理 */ }
+}
 
 // 生成结束时 store 会把 historyDirty +1，触发这里重拉批次汇总 + 清空 items 缓存，
 // 避免旧的懒加载数据里少了刚生成的一批。
@@ -76,6 +86,18 @@ const { summary: knowledgeSummary } = useKnowledgeMatches(knowledgeCounts, knowl
     </el-tabs>
 
     <div v-if="tabActive === 'generate'" class="gen-container">
+      <el-alert
+        v-if="llmStatus && !llmStatus.configured && !llmStatus.fallback_available"
+        type="error"
+        :closable="false"
+        class="cred-alert"
+        title="尚未配置大模型凭据，也没有系统默认模型，暂不能生成。"
+      >
+        <el-button type="primary" size="small" @click="router.push('/settings')">前往设置</el-button>
+      </el-alert>
+      <div v-else-if="llmStatus" class="cred-note">
+        当前模型：<strong>{{ llmStatus.configured ? `我的凭据 · ${llmStatus.model}` : `系统默认 · ${llmStatus.fallback_model}` }}</strong>
+      </div>
       <div class="top-panels">
         <div class="input-panel">
           <RequirementInputCard
@@ -145,6 +167,8 @@ const { summary: knowledgeSummary } = useKnowledgeMatches(knowledgeCounts, knowl
 <style scoped>
 .gen-view { max-width: 1200px; margin: 0 auto; }
 .gen-container { display: flex; flex-direction: column; gap: 24px; }
+.cred-alert { margin-bottom: 0; }
+.cred-note { font-size: 12px; color: #909399; }
 /* 用 grid 固定两栏：左栏 420px，右栏 minmax(320px,1fr) 保证下限，任何生成阶段都不会被挤成 0
    宽而消失（flex 布局下 input-panel 不能收缩、knowledge-panel min-width:0 会被压没的根因）。 */
 .top-panels { display: grid; grid-template-columns: 420px minmax(320px, 1fr); gap: 24px; align-items: stretch; }

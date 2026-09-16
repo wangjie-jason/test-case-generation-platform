@@ -13,6 +13,7 @@ const routes: RouteRecordRaw[] = [
     // 但早期链接/书签可能停在 /stats，保留 redirect 比直接 404 友好。
     { path: 'stats', redirect: '/' },
     { path: 'knowledge', name: 'knowledge', component: () => import('@/views/KnowledgeView.vue') },
+    { path: 'settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
     { path: '/:pathMatch(.*)*', name: 'not-found', component: () => import('@/views/NotFoundView.vue') },
   ]},
 ]

@@ -23,6 +23,8 @@ function onCommand(command: string) {
   if (command === 'logout') {
     auth.logout()
     router.replace('/login')
+  } else if (command === 'settings') {
+    router.push('/settings')
   }
 }
 </script>
@@ -52,6 +54,7 @@ function onCommand(command: string) {
         </span>
         <template #dropdown>
           <el-dropdown-menu>
+            <el-dropdown-item command="settings">账号设置</el-dropdown-item>
             <el-dropdown-item command="logout">退出登录</el-dropdown-item>
           </el-dropdown-menu>
         </template>

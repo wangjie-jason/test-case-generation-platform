@@ -62,9 +62,10 @@ def stage(name: str) -> Iterator[None]:
         _stage.reset(token)
 
 
-def record(model: str, usage: dict) -> None:
+def record(model: str, usage: dict, source: str | None = None) -> None:
     """把服务端上报的一段 usage 记进当前 sink。没装收集器时静默跳过。
 
+    source 标记这通调用花的是个人 key('user') 还是系统兜底('system')。
     静默跳过是有意的：llm_service 是通用封装，脚本或其它调用方直接调它不该因为
     没有采集上下文就报错。代价是漏采，但漏采只影响统计，不影响生成本身。
     """
@@ -93,6 +94,7 @@ def record(model: str, usage: dict) -> None:
         "completion_tokens": completion,
         "reasoning_tokens": reasoning,
         "total_tokens": total,
+        "credential_source": source,
     })
 
 

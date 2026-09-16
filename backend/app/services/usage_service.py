@@ -36,8 +36,14 @@ from app.utils.token_usage import (  # noqa: F401
 logger = logging.getLogger(__name__)
 
 
-async def flush(db: AsyncSession, records: list[dict], batch_id: str | None = None) -> None:
-    """把收集到的流水写库。batch_id 非空时回填到每条上，供批次级消耗展示。
+async def flush(
+    db: AsyncSession,
+    records: list[dict],
+    batch_id: str | None = None,
+    owner_id: str | None = None,
+) -> None:
+    """把收集到的流水写库。batch_id 非空时回填到每条上，供批次级消耗展示；
+    owner_id 标记花费归属人，credential_source 区分个人 key / 系统兜底。
 
     统计功能失败绝不能连坐生成结果：这里整体 try 住，出错只打日志。用例已经
     落库成功了，不该因为记账写不进去就把任务标成失败。
@@ -54,6 +60,8 @@ async def flush(db: AsyncSession, records: list[dict], batch_id: str | None = No
                 reasoning_tokens=r.get("reasoning_tokens", 0),
                 total_tokens=r.get("total_tokens", 0),
                 batch_id=batch_id,
+                owner_id=owner_id,
+                credential_source=r.get("credential_source"),
             ))
         await db.commit()
     except Exception:
