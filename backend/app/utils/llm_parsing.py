@@ -1,9 +1,4 @@
-"""LLM 输出的 JSON 解析与截断抢救（纯标准库，可轻量测试）。
-
-从 generator_service 抽出来的原因与 case_grouping / case_ordering 一致：
-那个模块顶部 import 了 sqlalchemy / ChromaStore / settings，而 CI 只装 pytest
-（不装 chromadb 433MB 与带 torch 的 sentence-transformers），测试一旦 import 到
-generator_service 就会 ModuleNotFoundError。这里只依赖 json / re / logging。
+"""LLM 输出的 JSON 解析与截断抢救（只依赖 json / re / logging 标准库）。
 
 这组函数处理的是同一个现实问题：LLM 的输出不保证是干净 JSON。实际遇到过的形态——
     1. 直接可解析的 JSON                       → json.loads 一把过

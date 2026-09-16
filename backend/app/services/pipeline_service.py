@@ -8,7 +8,7 @@
 回传阶段产物。本模块只负责串阶段、转发事件、做阶段间判定，不掺任何阶段内部细节。
 
 实际各阶段逻辑在同目录的 stage 模块里：
-- pipeline_deps       外部依赖接缝（LLM/检索/校验的注入点，测试在此换实现）
+- pipeline_deps       外部依赖接缝（LLM/检索/校验统一在此导入，各 stage 走模块属性调用）
 - pipeline_context_service    共享上下文（_Context、检索、prompt 助手、并发运行器等）
 - pipeline_generate_service   阶段①：模块拆分 + 分模块/单批生成 + 跨批去重
 - pipeline_review_service     阶段②：自动校验 + 分模块并行评审
@@ -41,9 +41,8 @@ class GeneratorService:
         """基于知识库补全（澄清）需求：检索 → LLM 补全 → 返回 Markdown 文本。
         不生成测试用例，只产出结构化的完整需求说明。"""
         retrieval = await deps.RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)
-        # 走模块属性而非 from-import：与 _build_context 保持同一个可替换接缝，否则测试
-        # 替掉 pipeline_context_service._get_historical_cases 时只有 generate_stream 生效、
-        # clarify 静默用真实实现（拆分前两者同在一个模块，不存在这个缺口）。
+        # 走模块属性而非 from-import：与 _build_context 保持同一条调用路径，
+        # 使 clarify 与 generate_stream 的历史用例检索行为始终一致。
         historical_cases = await pipeline_context_service._get_historical_cases(
             requirement_text, retrieval["query_keywords"], kb_ids)
         system_content, user_content = PromptService.build_clarify(

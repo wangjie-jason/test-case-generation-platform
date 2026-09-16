@@ -4,10 +4,6 @@
 本模块 re-export 其公开 API，故调用方统一 `from app.services import usage_service`
 即可，不必关心两边的分工。
 
-拆分原因：CI 只装 pytest、不装 requirements.txt（避开 chromadb 与 torch），
-测试若 import 到 sqlalchemy 就会 ModuleNotFoundError。采集是纯 Python 逻辑，
-抽出去即可轻量测试——与 v0.23 把 case_grouping 从 generator_service 抽出同一思路。
-
 落库时机：全程只在内存里 append，等生成任务结束、拿到 batch_id 后一次性 flush。
 这样每条流水都带得上批次归属（批次级消耗要靠它），也避免 15 路并发各自开
 session 写 SQLite。

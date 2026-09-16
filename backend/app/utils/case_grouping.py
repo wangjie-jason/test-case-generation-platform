@@ -1,9 +1,5 @@
 """标题【】前缀的解析与补充用例的就近插入（纯字符串逻辑，无外部依赖）。
 
-从 generator_service 抽出来，为的是让排序/归位这条逻辑可测：generator_service 顶部
-import 了 ChromaStore，测试一 import 就连带拉起 chromadb（约 433 MB），CI 里装依赖既慢
-又脆。这里的函数只做字符串与列表处理，测试和 CI 都不必碰向量库。
-
 注意本模块的 title_path 与 case_ordering.title_segs 并非同一语义：前者丢弃空段
 （【A--B】→ ['A','B']），后者保留（→ ('A','','B')）。搬迁时刻意保持各自原样，未"顺手
 统一"——归位与排序是两条独立的既有行为，合并语义等于悄悄改动其中一条。

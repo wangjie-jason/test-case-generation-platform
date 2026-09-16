@@ -19,7 +19,7 @@ from app.schemas.generation import (
 )
 from app.services import usage_service
 from app.services.excel_service import ExcelExportService
-from app.services.generator_service import GeneratorService
+from app.services.pipeline_service import GeneratorService
 from app.services.llm_service import LLMServiceError
 from app.services.parser_service import ParserService
 from app.services.task_service import TaskManager
