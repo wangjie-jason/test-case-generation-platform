@@ -1,15 +1,16 @@
-version: '3.8'
-
 services:
   backend:
     build: ./backend
     ports:
       - "8000:8000"
+    # 运行时配置（含兜底模型 key、飞书凭据、后续的首管理员/JWT/Fernet 密钥）统一从
+    # backend/.env 注入；该文件被 .dockerignore 排除、不进镜像。新部署从 .env.example 复制。
+    env_file:
+      - ./backend/.env
     environment:
+      # 仅容器内路径覆盖，优先级高于 env_file，确保库文件落在挂载卷里。
       - DATABASE_URL=sqlite+aiosqlite:///app/data/testcase_platform.db
       - CHROMA_PERSIST_DIR=/app/data/chromadb
-      - LLM_API_KEY=${LLM_API_KEY:-}
-      - LLM_MODEL=${LLM_MODEL:-gpt-3.5-turbo}
     volumes:
       - ./data:/app/data
       - ./backend/uploads:/app/uploads
