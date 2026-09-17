@@ -2,6 +2,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -19,6 +20,21 @@ def now_local() -> datetime:
 
 engine = create_async_engine(settings.DATABASE_URL, echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+# SQLite 调优（多用户后后台任务写、看板同时读）：
+#   WAL       读写不互斥，明显改善"生成写库时统计页读库"的卡顿；
+#   NORMAL    WAL 下安全且更快，崩溃一致性由 WAL 保证；
+#   busy_timeout  写锁被占时等待而非立刻报 database is locked。
+# 仅对 sqlite 生效；每个新连接执行一次 PRAGMA（PRAGMA 不随连接池复用持久）。
+if settings.DATABASE_URL.startswith("sqlite"):
+    @event.listens_for(engine.sync_engine, "connect")
+    def _sqlite_pragmas(dbapi_conn, _record):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA busy_timeout=5000")
+        cur.close()
 
 
 class Base(DeclarativeBase):
