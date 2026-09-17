@@ -1,5 +1,4 @@
 import client from './client'
-import { getClientId } from '@/utils/clientId'
 import { getToken, redirectToLogin } from '@/utils/authToken'
 import type { GeneratedTestCase, TestCase } from '@/types/testCase'
 
@@ -188,11 +187,11 @@ export const generationApi = {
   },
   // 启动后台生成任务，立即返回 task_id；任务脱离请求，刷新/切走后仍继续。
   startTask(data: GenerateRequest) {
-    return client.post<any, GenerationTaskSummary>('/generate/async', { ...data, client_id: getClientId() })
+    return client.post<any, GenerationTaskSummary>('/generate/async', data)
   },
-  // 列出本客户端仍在运行的任务，供刷新后「继续查看」。
+  // 列出当前用户仍在运行的任务，供刷新后「继续查看」（归属由登录态决定）。
   activeTasks() {
-    return client.get<any, GenerationTaskSummary[]>('/generate/active', { params: { client_id: getClientId() } })
+    return client.get<any, GenerationTaskSummary[]>('/generate/active')
   },
   // 重连到指定任务的事件流：先重放已产生事件，再接收实时事件。
   async streamTask(taskId: string, onEvent: (event: GenerateStreamEvent) => void, signal?: AbortSignal): Promise<void> {

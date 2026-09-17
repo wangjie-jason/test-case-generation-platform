@@ -4,6 +4,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.knowledge_base import KnowledgeBase
+from app.models.user import User
+from app.routers.deps import get_current_user
+from app.services import llm_credential_service
+from app.utils import llm_credentials
 from app.schemas.knowledge import (
     BusinessRuleCreate,
     BusinessRuleResponse,
@@ -94,11 +98,14 @@ router.include_router(_make_crud("term-mappings", _kb.list_term_mappings, _kb.cr
 async def list_prd_documents(kb_id: str, db: AsyncSession = Depends(get_db)): return await _kb.list_prd_documents(db, kb_id)
 
 @router.post("/knowledge-bases/{kb_id}/prd-documents/upload", response_model=PrdDocumentResponse, status_code=201)
-async def upload_prd(kb_id: str, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+async def upload_prd(kb_id: str, file: UploadFile = File(...), user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename else "txt"
     if ext not in {"pdf", "docx", "md", "txt"}: raise HTTPException(400, f"不支持: {ext}")
     content = await file.read()
-    raw_text = await ParserService.parse(file.filename or "未命名", content)
+    # 图片 OCR 用当前用户凭据（个人优先、否则系统兜底）；都没配则降级，不挡上传。
+    creds = await llm_credential_service.resolve_credentials_optional(db, user.id)
+    with llm_credentials.bind(creds):
+        raw_text = await ParserService.parse(file.filename or "未命名", content)
     doc = await _kb.create_prd_document(db, kb_id, file.filename or "未命名", ext, raw_text)
     await IndexingService.index_prd(doc)
     return doc

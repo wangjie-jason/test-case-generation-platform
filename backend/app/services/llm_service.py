@@ -7,8 +7,7 @@ from typing import AsyncGenerator
 import httpx
 
 from app.config import settings
-# 只用采集函数，直接指向纯逻辑 app.utils.token_usage，不经依赖 sqlalchemy 的 usage_service。
-from app.utils import token_usage
+from app.utils import llm_credentials, token_usage
 
 
 logger = logging.getLogger(__name__)
@@ -64,9 +63,15 @@ class LLMService:
 
     def __init__(self):
         _remove_proxy_env()
-        self.api_key = settings.LLM_API_KEY
-        self.base_url = settings.LLM_BASE_URL.rstrip("/")
-        self.model = settings.LLM_MODEL
+        # 凭据（api_key/base_url/model）来自当前调用链绑定的用户凭据或系统兜底，
+        # 由入口（HTTP 请求 / 后台任务）经 llm_credentials.bind 设置；取不到说明
+        # 个人与兜底都没配，直接报可行动错误。温度/上限等仍是系统级参数。
+        creds = llm_credentials.get_required()
+        self.api_key = creds.api_key
+        self.base_url = creds.base_url
+        self.model = creds.model
+        # 'user'（花个人额度）或 'system'（公司兜底），记账时随流水落库。
+        self.source = creds.source
         self.temperature = settings.LLM_TEMPERATURE
         self.max_tokens = settings.LLM_MAX_TOKENS
         self.reasoning_effort = settings.LLM_REASONING_EFFORT.strip() or None
@@ -187,7 +192,7 @@ class LLMService:
                                     # chunk 里 choices 是空数组，先 data["choices"][0] 会抛
                                     # IndexError 被下面的 except 吞掉，usage 就永远采不到。
                                     if data.get("usage"):
-                                        token_usage.record(self.model, data["usage"])
+                                        token_usage.record(self.model, data["usage"], source=self.source)
                                     if not data.get("choices"):
                                         continue
                                     choice = data["choices"][0]
