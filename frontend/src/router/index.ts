@@ -14,6 +14,7 @@ const routes: RouteRecordRaw[] = [
     { path: 'stats', redirect: '/' },
     { path: 'knowledge', name: 'knowledge', component: () => import('@/views/KnowledgeView.vue') },
     { path: 'settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
+    { path: 'users', name: 'users', component: () => import('@/views/UsersView.vue'), meta: { requiresAdmin: true } },
     { path: '/:pathMatch(.*)*', name: 'not-found', component: () => import('@/views/NotFoundView.vue') },
   ]},
 ]
@@ -32,6 +33,8 @@ router.beforeEach(async (to) => {
   // 刷新后内存里没有 user，先用 token 恢复一次（失败会清态并被下一轮守卫拦回登录页）。
   await auth.ensureLoaded()
   if (!auth.user) return { path: '/login' }
+  // 管理员页面：非管理员回首页。
+  if (to.meta.requiresAdmin && !auth.user.is_admin) return { path: '/' }
   return true
 })
 

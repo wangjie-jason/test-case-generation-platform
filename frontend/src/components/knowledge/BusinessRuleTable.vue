@@ -4,7 +4,7 @@ import { useKnowledgeStore } from '@/stores/knowledge'
 import BusinessRuleForm from './BusinessRuleForm.vue'
 import KnowledgeResourceTable from './KnowledgeResourceTable.vue'
 
-const props = defineProps<{ kbId: string }>()
+const props = defineProps<{ kbId: string; readonly?: boolean }>()
 const store = useKnowledgeStore()
 const items = computed(() => store.businessRules)
 
@@ -23,6 +23,7 @@ const columns = [
     :create="d => store.createBusinessRule(props.kbId, d)"
     :update="(id, d) => store.updateBusinessRule(props.kbId, id, d)"
     :remove="id => store.deleteBusinessRule(props.kbId, id)"
+    :readonly="readonly"
   >
     <template #cell-rule_type="{ row }">
       <el-tag :type="row.rule_type === 'hard' ? 'danger' : 'warning'" size="small">

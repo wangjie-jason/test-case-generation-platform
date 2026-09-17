@@ -4,7 +4,7 @@ import { useKnowledgeStore } from '@/stores/knowledge'
 import FieldDictForm from './FieldDictForm.vue'
 import KnowledgeResourceTable from './KnowledgeResourceTable.vue'
 
-const props = defineProps<{ kbId: string }>()
+const props = defineProps<{ kbId: string; readonly?: boolean }>()
 const store = useKnowledgeStore()
 const items = computed(() => store.fieldDicts)
 
@@ -24,5 +24,6 @@ const columns = [
     :create="d => store.createFieldDict(props.kbId, d)"
     :update="(id, d) => store.updateFieldDict(props.kbId, id, d)"
     :remove="id => store.deleteFieldDict(props.kbId, id)"
+    :readonly="readonly"
   />
 </template>

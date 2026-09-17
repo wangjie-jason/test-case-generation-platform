@@ -8,7 +8,7 @@ import type { DefectRecord } from '@/types/knowledge'
 type DefectSeverity = NonNullable<DefectRecord['severity']>
 type DefectForm = Pick<DefectRecord, 'title' | 'root_cause' | 'description' | 'related_case' | 'occurred_at'> & { severity: DefectSeverity }
 
-const props = defineProps<{ kbId: string }>()
+const props = defineProps<{ kbId: string; readonly?: boolean }>()
 const store = useKnowledgeStore()
 const items = computed(() => store.defectRecords)
 const emptyForm = (): DefectForm => ({ title: '', severity: 'minor', root_cause: '', description: '', related_case: '', occurred_at: '' })
@@ -30,7 +30,7 @@ const sevLabel = (s: string) => ({ critical: '致命', major: '严重', minor: '
 </script>
 <template>
   <div>
-    <div style="margin-bottom:12px;display:flex;gap:8px">
+    <div v-if="!readonly" style="margin-bottom:12px;display:flex;gap:8px">
       <el-button @click="openCreate">+ 添加缺陷</el-button>
       <el-upload :auto-upload="true" :show-file-list="false" :http-request="handleImport" accept=".xlsx,.xls" style="display:inline-block"><el-button plain>导入 Excel</el-button></el-upload>
     </div>
@@ -39,7 +39,7 @@ const sevLabel = (s: string) => ({ critical: '致命', major: '严重', minor: '
       <el-table-column label="级别" width="70"><template #default="{ row }"><el-tag :type="sev(row.severity)" size="small">{{ sevLabel(row.severity) }}</el-tag></template></el-table-column>
       <el-table-column prop="root_cause" label="根因" width="100" />
       <el-table-column label="描述" min-width="280"><template #default="{ row }"><div style="max-height:40px;overflow:hidden;font-size:12px">{{ row.description.slice(0, 150) }}</div></template></el-table-column>
-      <el-table-column label="操作" width="140"><template #default="{ row }"><el-button link type="primary" @click="openEdit(row)">编辑</el-button><el-button link type="danger" @click="handleDelete(row.id)">删除</el-button></template></el-table-column>
+      <el-table-column v-if="!readonly" label="操作" width="140"><template #default="{ row }"><el-button link type="primary" @click="openEdit(row)">编辑</el-button><el-button link type="danger" @click="handleDelete(row.id)">删除</el-button></template></el-table-column>
     </el-table>
     <el-empty v-if="!items.length" description="暂无缺陷" />
     <el-dialog v-model="dialogVisible" :title="editingItem ? '编辑缺陷' : '添加缺陷'" width="560px">

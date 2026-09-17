@@ -4,7 +4,7 @@ import { useKnowledgeStore } from '@/stores/knowledge'
 import TermMappingForm from './TermMappingForm.vue'
 import KnowledgeResourceTable from './KnowledgeResourceTable.vue'
 
-const props = defineProps<{ kbId: string }>()
+const props = defineProps<{ kbId: string; readonly?: boolean }>()
 const store = useKnowledgeStore()
 const items = computed(() => store.termMappings)
 
@@ -24,6 +24,7 @@ const columns = [
     :create="d => store.createTermMapping(props.kbId, d)"
     :update="(id, d) => store.updateTermMapping(props.kbId, id, d)"
     :remove="id => store.deleteTermMapping(props.kbId, id)"
+    :readonly="readonly"
   >
     <template #cell-arrow>&harr;</template>
   </KnowledgeResourceTable>

@@ -4,7 +4,7 @@ import { useKnowledgeStore } from '@/stores/knowledge'
 import StateMachineForm from './StateMachineForm.vue'
 import KnowledgeResourceTable from './KnowledgeResourceTable.vue'
 
-const props = defineProps<{ kbId: string }>()
+const props = defineProps<{ kbId: string; readonly?: boolean }>()
 const store = useKnowledgeStore()
 const items = computed(() => store.stateMachines)
 
@@ -25,6 +25,7 @@ const columns = [
     :create="d => store.createStateMachine(props.kbId, d)"
     :update="(id, d) => store.updateStateMachine(props.kbId, id, d)"
     :remove="id => store.deleteStateMachine(props.kbId, id)"
+    :readonly="readonly"
   >
     <template #cell-arrow>&rarr;</template>
   </KnowledgeResourceTable>
