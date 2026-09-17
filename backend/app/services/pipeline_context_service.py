@@ -61,10 +61,13 @@ def _prompt_kwargs(requirement_text: str, retrieval: dict, historical_cases: lis
 
 
 async def _build_context(db: AsyncSession, requirement_text: str,
-                         kb_ids: list[str] | None) -> _Context:
-    """检索知识库 + 历史用例，顺带算好推给前端的命中统计与明细。"""
+                         kb_ids: list[str] | None, owner_id: str | None) -> _Context:
+    """检索知识库 + 历史用例，顺带算好推给前端的命中统计与明细。
+
+    kb_ids 已在路由层收敛为该用户可见的库；owner_id 用于历史用例 few-shot 按人隔离。
+    """
     retrieval = await deps.RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)
-    historical_cases = await _get_historical_cases(requirement_text, retrieval["query_keywords"], kb_ids)
+    historical_cases = await _get_historical_cases(requirement_text, retrieval["query_keywords"], owner_id)
     base_system, _ = PromptService.build(**_prompt_kwargs(requirement_text, retrieval, historical_cases))
     return _Context(
         requirement_text=requirement_text,
@@ -119,13 +122,15 @@ def _clip_text(item: dict) -> dict:
     return clipped
 
 
-async def _get_historical_cases(text: str, keywords: list[str], kb_ids: list[str] | None = None) -> list[dict]:
-    if not keywords:
+async def _get_historical_cases(text: str, keywords: list[str], owner_id: str | None) -> list[dict]:
+    if not keywords or not owner_id:
         return []
     try:
         c = ChromaStore()
+        # 只命中本人历史用例：kb_ids 对该集合无意义（生成用例不绑库、kb_id 为空），
+        # 隔离靠 metadata.owner_id。存量旧向量没有该 key，会被 where 过滤（reindex 后恢复）。
         results = [r for r in await asyncio.to_thread(
-            c.search, "historical_cases", text, 3, kb_ids
+            c.search, "historical_cases", text, 3, None, {"owner_id": owner_id}
         ) if r.get("text")]
         if not results:
             return []

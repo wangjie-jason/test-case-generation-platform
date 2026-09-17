@@ -1,12 +1,20 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.knowledge_base import KnowledgeBase
 from app.models.user import User
+from app.models.field_dict import FieldDict
+from app.models.business_rule import BusinessRule
+from app.models.state_machine import StateMachine
+from app.models.term_mapping import TermMapping
+from app.models.prd_document import PrdDocument
+from app.models.defect_record import DefectRecord
+from app.models.test_case import TestCase
 from app.routers.deps import get_current_user
-from app.services import llm_credential_service
+from app.services import access_service, llm_credential_service
 from app.utils import llm_credentials
 from app.schemas.knowledge import (
     BusinessRuleCreate,
@@ -38,32 +46,88 @@ router = APIRouter()
 _kb = KnowledgeService()
 
 
+async def _owner_name_map(db: AsyncSession, kbs: list[KnowledgeBase]) -> dict[str, str]:
+    ids = {k.owner_id for k in kbs}
+    if not ids:
+        return {}
+    users = await db.scalars(select(User).where(User.id.in_(ids)))
+    return {u.id: (u.display_name or u.username) for u in users}
+
+
+async def _kb_payload(db: AsyncSession, kb: KnowledgeBase, user: User,
+                      name_map: dict[str, str] | None = None) -> dict:
+    if name_map is None:
+        owner = await db.get(User, kb.owner_id)
+        owner_name = (owner.display_name or owner.username) if owner else None
+    else:
+        owner_name = name_map.get(kb.owner_id)
+    return {
+        "id": kb.id, "name": kb.name, "description": kb.description,
+        "owner_id": kb.owner_id, "visibility": kb.visibility,
+        "owner_name": owner_name, "can_manage": access_service.can_manage(kb, user),
+        "created_at": kb.created_at, "updated_at": kb.updated_at,
+    }
+
+
 # ── 知识库 ──
 
 @router.post("/knowledge-bases", response_model=KnowledgeBaseResponse, status_code=201)
-async def create_kb(data: KnowledgeBaseCreate, db: AsyncSession = Depends(get_db)):
-    kb = KnowledgeBase(**data.model_dump())
-    db.add(kb); await db.commit(); await db.refresh(kb); return kb
+async def create_kb(data: KnowledgeBaseCreate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    kb = KnowledgeBase(
+        name=data.name, description=data.description,
+        visibility=data.visibility, owner_id=user.id,
+    )
+    db.add(kb)
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(400, "同名团队知识库已存在") from exc
+    await db.refresh(kb)
+    return await _kb_payload(db, kb, user)
 
 @router.get("/knowledge-bases", response_model=list[KnowledgeBaseResponse])
-async def list_kbs(db: AsyncSession = Depends(get_db)):
-    r = await db.execute(select(KnowledgeBase).order_by(KnowledgeBase.created_at.desc()))
-    return r.scalars().all()
+async def list_kbs(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    kbs = list(await db.scalars(
+        select(KnowledgeBase)
+        .where((KnowledgeBase.owner_id == user.id) | (KnowledgeBase.visibility == access_service.TEAM))
+        .order_by(KnowledgeBase.created_at.desc())
+    ))
+    name_map = await _owner_name_map(db, kbs)
+    return [await _kb_payload(db, k, user, name_map) for k in kbs]
 
 @router.put("/knowledge-bases/{kb_id}", response_model=KnowledgeBaseResponse)
-async def update_kb(kb_id: str, data: KnowledgeBaseUpdate, db: AsyncSession = Depends(get_db)):
-    kb = await db.get(KnowledgeBase, kb_id)
-    if not kb: raise HTTPException(404, "知识库不存在")
-    # exclude_unset：只更新提交的字段；description 显式传 None 表示清空（字段可空）。
-    for field, value in data.model_dump(exclude_unset=True).items():
-        setattr(kb, field, value)
-    await db.commit(); await db.refresh(kb); return kb
+async def update_kb(kb_id: str, data: KnowledgeBaseUpdate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    # 团队库只有创建者/管理员能改；个人库只有本人能改（读不到即 404）。
+    kb = await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
+    values = data.model_dump(exclude_unset=True)
+    if "name" in values and values["name"]:
+        kb.name = values["name"].strip()
+    if "description" in values:
+        kb.description = values["description"]  # 显式 None = 清空
+    if "visibility" in values and values["visibility"]:
+        kb.visibility = values["visibility"]
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(400, "同名知识库已存在") from exc
+    await db.refresh(kb)
+    return await _kb_payload(db, kb, user)
 
 @router.delete("/knowledge-bases/{kb_id}")
-async def delete_kb(kb_id: str, db: AsyncSession = Depends(get_db)):
-    kb = await db.get(KnowledgeBase, kb_id)
-    if not kb: raise HTTPException(404, "知识库不存在")
-    await db.delete(kb); await db.commit()
+async def delete_kb(kb_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    kb = await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
+    # SQLite 未开 foreign_keys pragma，ON DELETE 不生效，必须显式级联，
+    # 否则六张子表与两个向量集合会留下孤儿、test_cases 悬着已删的 kb_id。
+    for model in (FieldDict, BusinessRule, StateMachine, TermMapping, PrdDocument, DefectRecord):
+        await db.execute(model.__table__.delete().where(model.kb_id == kb_id))
+    await db.execute(TestCase.__table__.update().where(TestCase.kb_id == kb_id).values(kb_id=None))
+    await db.delete(kb)
+    await db.commit()
+    # 向量删除放事务外（阻塞调用），失败只记日志、不影响主删除。
+    await IndexingService.remove_kb(PRD_COLLECTION, kb_id)
+    await IndexingService.remove_kb(DEFECT_COLLECTION, kb_id)
     return {"message": "删除成功"}
 
 # ── 知识项 CRUD（按知识库隔离） ──
@@ -71,16 +135,23 @@ async def delete_kb(kb_id: str, db: AsyncSession = Depends(get_db)):
 def _make_crud(prefix, list_fn, create_fn, get_fn, update_fn, delete_fn, create_schema, update_schema, response_schema):
     sub = APIRouter()
     @sub.get("", response_model=list[response_schema])
-    async def list_items(kb_id: str, db: AsyncSession = Depends(get_db)): return await list_fn(db, kb_id)
+    async def list_items(kb_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+        # 团队库人人可读、个人库仅本人（读不到即 404）。
+        await access_service.get_kb_or_404(db, kb_id, user, require_manage=False)
+        return await list_fn(db, kb_id)
     @sub.post("", response_model=response_schema, status_code=201)
-    async def create_item(kb_id: str, data: create_schema, db: AsyncSession = Depends(get_db)): return await create_fn(db, kb_id, data.model_dump())
+    async def create_item(kb_id: str, data: create_schema, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+        await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
+        return await create_fn(db, kb_id, data.model_dump())
     @sub.put("/{item_id}", response_model=response_schema)
-    async def update_item(kb_id: str, item_id: str, data: update_schema, db: AsyncSession = Depends(get_db)):
+    async def update_item(kb_id: str, item_id: str, data: update_schema, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+        await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
         item = await get_fn(db, item_id)
         if not item or item.kb_id != kb_id: raise HTTPException(404, "记录不存在")
         return await update_fn(db, item, data.model_dump(exclude_unset=True))
     @sub.delete("/{item_id}")
-    async def delete_item(kb_id: str, item_id: str, db: AsyncSession = Depends(get_db)):
+    async def delete_item(kb_id: str, item_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+        await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
         item = await get_fn(db, item_id)
         if not item or item.kb_id != kb_id: raise HTTPException(404, "记录不存在")
         await delete_fn(db, item)
@@ -95,10 +166,13 @@ router.include_router(_make_crud("term-mappings", _kb.list_term_mappings, _kb.cr
 # ── PRD 文档 ──
 
 @router.get("/knowledge-bases/{kb_id}/prd-documents", response_model=list[PrdDocumentResponse])
-async def list_prd_documents(kb_id: str, db: AsyncSession = Depends(get_db)): return await _kb.list_prd_documents(db, kb_id)
+async def list_prd_documents(kb_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await access_service.get_kb_or_404(db, kb_id, user)
+    return await _kb.list_prd_documents(db, kb_id)
 
 @router.post("/knowledge-bases/{kb_id}/prd-documents/upload", response_model=PrdDocumentResponse, status_code=201)
 async def upload_prd(kb_id: str, file: UploadFile = File(...), user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
     ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename else "txt"
     if ext not in {"pdf", "docx", "md", "txt"}: raise HTTPException(400, f"不支持: {ext}")
     content = await file.read()
@@ -112,10 +186,9 @@ async def upload_prd(kb_id: str, file: UploadFile = File(...), user: User = Depe
 
 
 @router.post("/knowledge-bases/{kb_id}/prd-documents/from-feishu", response_model=PrdDocumentResponse, status_code=201)
-async def import_prd_from_feishu(kb_id: str, req: FeishuImportRequest, db: AsyncSession = Depends(get_db)):
+async def import_prd_from_feishu(kb_id: str, req: FeishuImportRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """从飞书文档 / Wiki 节点导入 PRD。按 obj_token 去重，重复导入覆盖原记录并重建向量索引。"""
-    kb = await db.get(KnowledgeBase, kb_id)
-    if not kb: raise HTTPException(404, "知识库不存在")
+    await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
     try:
         result = await feishu_import_from_url(req.url)
     except FeishuImportError as e:
@@ -132,7 +205,8 @@ async def import_prd_from_feishu(kb_id: str, req: FeishuImportRequest, db: Async
     return doc
 
 @router.delete("/knowledge-bases/{kb_id}/prd-documents/{doc_id}")
-async def delete_prd(kb_id: str, doc_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_prd(kb_id: str, doc_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
     doc = await _kb.get_prd_document(db, doc_id)
     if not doc or doc.kb_id != kb_id: raise HTTPException(404, "不存在")
     await _kb.delete_prd_document(db, doc)
@@ -142,16 +216,20 @@ async def delete_prd(kb_id: str, doc_id: str, db: AsyncSession = Depends(get_db)
 # ── 缺陷记录 ──
 
 @router.get("/knowledge-bases/{kb_id}/defect-records", response_model=list[DefectRecordResponse])
-async def list_defects(kb_id: str, db: AsyncSession = Depends(get_db)): return await _kb.list_defect_records(db, kb_id)
+async def list_defects(kb_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await access_service.get_kb_or_404(db, kb_id, user)
+    return await _kb.list_defect_records(db, kb_id)
 
 @router.post("/knowledge-bases/{kb_id}/defect-records", response_model=DefectRecordResponse, status_code=201)
-async def create_defect(kb_id: str, data: DefectRecordCreate, db: AsyncSession = Depends(get_db)):
+async def create_defect(kb_id: str, data: DefectRecordCreate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
     record = await _kb.create_defect_record(db, kb_id, data.model_dump())
     await IndexingService.index_defect(record)
     return record
 
 @router.put("/knowledge-bases/{kb_id}/defect-records/{record_id}", response_model=DefectRecordResponse)
-async def update_defect(kb_id: str, record_id: str, data: DefectRecordUpdate, db: AsyncSession = Depends(get_db)):
+async def update_defect(kb_id: str, record_id: str, data: DefectRecordUpdate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
     r = await _kb.get_defect_record(db, record_id)
     if not r or r.kb_id != kb_id: raise HTTPException(404, "不存在")
     updated = await _kb.update_defect_record(db, r, data.model_dump(exclude_unset=True))
@@ -159,7 +237,8 @@ async def update_defect(kb_id: str, record_id: str, data: DefectRecordUpdate, db
     return updated
 
 @router.delete("/knowledge-bases/{kb_id}/defect-records/{record_id}")
-async def delete_defect(kb_id: str, record_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_defect(kb_id: str, record_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
     r = await _kb.get_defect_record(db, record_id)
     if not r or r.kb_id != kb_id: raise HTTPException(404, "不存在")
     await _kb.delete_defect_record(db, r)
@@ -169,7 +248,8 @@ async def delete_defect(kb_id: str, record_id: str, db: AsyncSession = Depends(g
 # ── 导入 ──
 
 @router.post("/knowledge-bases/{kb_id}/import-defects")
-async def import_defects(kb_id: str, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+async def import_defects(kb_id: str, file: UploadFile = File(...), user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
     content = await file.read()
     records = ExcelImportService.parse_defect_records(content)
     created = [await _kb.create_defect_record(db, kb_id, r) for r in records]

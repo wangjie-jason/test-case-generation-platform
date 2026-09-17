@@ -37,14 +37,14 @@ from app.utils.case_ordering import order_cases
 class GeneratorService:
 
     @staticmethod
-    async def clarify(db: AsyncSession, requirement_text: str, kb_ids: list[str] | None = None) -> str:
+    async def clarify(db: AsyncSession, requirement_text: str, kb_ids: list[str] | None = None,
+                      owner_id: str | None = None) -> str:
         """基于知识库补全（澄清）需求：检索 → LLM 补全 → 返回 Markdown 文本。
         不生成测试用例，只产出结构化的完整需求说明。"""
         retrieval = await deps.RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)
-        # 走模块属性而非 from-import：与 _build_context 保持同一条调用路径，
-        # 使 clarify 与 generate_stream 的历史用例检索行为始终一致。
+        # 与 _build_context 走同一条历史用例检索路径，clarify 与 generate_stream 行为一致。
         historical_cases = await pipeline_context_service._get_historical_cases(
-            requirement_text, retrieval["query_keywords"], kb_ids)
+            requirement_text, retrieval["query_keywords"], owner_id)
         system_content, user_content = PromptService.build_clarify(
             **_prompt_kwargs(requirement_text, retrieval, historical_cases)
         )
@@ -52,7 +52,8 @@ class GeneratorService:
             return await deps.LLMService().generate(system_content, user_content)
 
     @staticmethod
-    async def generate_stream(db: AsyncSession, requirement_text: str, kb_ids: list[str] | None = None) -> AsyncGenerator[dict, None]:
+    async def generate_stream(db: AsyncSession, requirement_text: str, kb_ids: list[str] | None = None,
+                              owner_id: str | None = None) -> AsyncGenerator[dict, None]:
         """完整生成流水线：检索 → 生成 → 校验+评审 → 补充 → 收口排序。
 
         每个阶段是一个独立的 async generator：自己 yield 前端事件，产物用 _results 事件
@@ -62,7 +63,7 @@ class GeneratorService:
         # 记录整体开始时间，complete 事件里回传总耗时（秒）。
         started_at = time.monotonic()
         yield {"type": "progress", "stage": "retrieving", "message": "正在检索知识库..."}
-        ctx = await _build_context(db, requirement_text, kb_ids)
+        ctx = await _build_context(db, requirement_text, kb_ids, owner_id)
         yield {"type": "progress", "stage": "constructing",
                "message": f"检索到 {sum(ctx.knowledge_used.values())} 条相关知识"}
 

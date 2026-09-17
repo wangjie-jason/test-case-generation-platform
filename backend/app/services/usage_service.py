@@ -12,11 +12,13 @@ session 写 SQLite。
 import logging
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import case as sa_case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import now_local
 from app.models.llm_usage import LlmUsage
+from app.models.test_case import TestCase
+from app.models.user import User
 
 # 采集 API 从纯逻辑模块 re-export：调用方无需知道拆分，统一走 usage_service。
 from app.utils.token_usage import (  # noqa: F401
@@ -69,16 +71,35 @@ async def flush(
         await db.rollback()
 
 
-async def summary(db: AsyncSession) -> dict:
-    """看板用的用量汇总：今日 / 本周 / 累计 + 按阶段拆分。"""
+async def summary(db: AsyncSession, owner_id: str | None = None) -> dict:
+    """看板用的用量汇总：今日 / 本周 / 累计 + 按阶段拆分。
+
+    owner_id 非空时只统计该用户（「我的」）；None 时统计全员（管理员/团队视图）。
+    """
     now = now_local()
     today_from = day_start(now)
     week_from = week_start(now)
 
+    def _filtered(*extra):
+        """加了 owner（及额外）过滤的查询起点，后续链式 with_only_columns/group_by。"""
+        conds = []
+        if owner_id is not None:
+            conds.append(LlmUsage.owner_id == owner_id)
+        conds.extend(extra)
+        stmt = select(LlmUsage)
+        if conds:
+            stmt = stmt.where(*conds)
+        return stmt
+
     async def _sum_since(since: datetime | None) -> int:
-        stmt = select(func.coalesce(func.sum(LlmUsage.total_tokens), 0))
+        conds = []
+        if owner_id is not None:
+            conds.append(LlmUsage.owner_id == owner_id)
         if since is not None:
-            stmt = stmt.where(LlmUsage.created_at >= since)
+            conds.append(LlmUsage.created_at >= since)
+        stmt = select(func.coalesce(func.sum(LlmUsage.total_tokens), 0))
+        if conds:
+            stmt = stmt.where(*conds)
         return int((await db.execute(stmt)).scalar() or 0)
 
     today = await _sum_since(today_from)
@@ -87,11 +108,12 @@ async def summary(db: AsyncSession) -> dict:
 
     # 按阶段拆分：用累计而非本周，样本更足、占比更稳（本周初可能只有一两次生成）。
     stage_rows = (await db.execute(
-        select(
+        _filtered().with_only_columns(
             LlmUsage.stage,
             func.coalesce(func.sum(LlmUsage.total_tokens), 0).label("tokens"),
             func.count(LlmUsage.id).label("calls"),
-        ).group_by(LlmUsage.stage).order_by(func.sum(LlmUsage.total_tokens).desc())
+        ).group_by(LlmUsage.stage)
+        .order_by(func.sum(LlmUsage.total_tokens).desc())
     )).all()
     by_stage = [
         {
@@ -104,29 +126,93 @@ async def summary(db: AsyncSession) -> dict:
     ]
 
     reasoning_total = int((await db.execute(
-        select(func.coalesce(func.sum(LlmUsage.reasoning_tokens), 0))
+        _filtered().with_only_columns(func.coalesce(func.sum(LlmUsage.reasoning_tokens), 0))
     )).scalar() or 0)
-    calls_total = int((await db.execute(select(func.count(LlmUsage.id)))).scalar() or 0)
+    calls_total = int((await db.execute(
+        _filtered().with_only_columns(func.count(LlmUsage.id))
+    )).scalar() or 0)
     # 已采集流水的起始时间。为 None 说明该功能刚上线、还没采到数据，前端据此提示
     # 「统计自 X 起」，免得把「累计 0」误读成「一次都没生成过」。
-    since = (await db.execute(select(func.min(LlmUsage.created_at)))).scalar()
+    since = (await db.execute(
+        _filtered().with_only_columns(func.min(LlmUsage.created_at))
+    )).scalar()
+    # 其中系统兜底模型花掉的 token（个人视图里提示自己用了多少公司额度）。
+    system_tokens = int((await db.execute(
+        _filtered(LlmUsage.credential_source == "system")
+        .with_only_columns(func.coalesce(func.sum(LlmUsage.total_tokens), 0))
+    )).scalar() or 0)
 
     return {
         "today_tokens": today,
         "week_tokens": week,
         "total_tokens": total,
         "reasoning_tokens": reasoning_total,
+        "system_tokens": system_tokens,
         "calls": calls_total,
         "by_stage": by_stage,
         "since": str(since) if since else None,
     }
 
 
-async def batch_tokens(db: AsyncSession) -> dict[str, int]:
-    """各批次的 token 消耗，供批次卡展示。返回 {batch_id: total_tokens}。"""
-    rows = (await db.execute(
+async def batch_tokens(db: AsyncSession, owner_id: str | None = None) -> dict[str, int]:
+    """各批次的 token 消耗，供批次卡展示。返回 {batch_id: total_tokens}。按人过滤。"""
+    stmt = (
         select(LlmUsage.batch_id, func.coalesce(func.sum(LlmUsage.total_tokens), 0).label("tokens"))
         .where(LlmUsage.batch_id.is_not(None))
         .group_by(LlmUsage.batch_id)
-    )).all()
+    )
+    if owner_id is not None:
+        stmt = stmt.where(LlmUsage.owner_id == owner_id)
+    rows = (await db.execute(stmt)).all()
     return {row.batch_id: int(row.tokens or 0) for row in rows}
+
+
+async def team_usage(db: AsyncSession) -> dict:
+    """团队视图：全员汇总 + 按模型/按人拆分（明细批次不在此暴露）。"""
+    base = await summary(db, owner_id=None)
+
+    by_model_rows = (await db.execute(
+        select(
+            LlmUsage.model,
+            func.coalesce(func.sum(LlmUsage.total_tokens), 0).label("tokens"),
+            func.count(LlmUsage.id).label("calls"),
+        ).group_by(LlmUsage.model).order_by(func.sum(LlmUsage.total_tokens).desc())
+    )).all()
+    by_model = [
+        {"model": r.model, "tokens": int(r.tokens or 0), "calls": int(r.calls or 0)}
+        for r in by_model_rows
+    ]
+
+    # 按人：流水 join 用户拿名字；system_tokens 单列该用户消耗的公司兜底额度，
+    # case_count 来自 test_cases（同表已在别处查，这里单独按人聚合一次）。
+    usage_rows = (await db.execute(
+        select(
+            LlmUsage.owner_id,
+            func.coalesce(func.sum(LlmUsage.total_tokens), 0).label("tokens"),
+            func.coalesce(func.sum(
+                sa_case((LlmUsage.credential_source == "system", LlmUsage.total_tokens), else_=0)
+            ), 0).label("system_tokens"),
+        ).group_by(LlmUsage.owner_id)
+    )).all()
+    case_rows = (await db.execute(
+        select(TestCase.owner_id, func.count(TestCase.id))
+        .group_by(TestCase.owner_id)
+    )).all()
+    case_map = {owner: n for owner, n in case_rows}
+    name_rows = await db.scalars(select(User).where(User.id.in_([r.owner_id for r in usage_rows if r.owner_id])))
+    name_map = {u.id: (u.display_name or u.username) for u in name_rows}
+    by_user = [
+        {
+            "user_id": r.owner_id,
+            "username": name_map.get(r.owner_id, "未知用户"),
+            "total_tokens": int(r.tokens or 0),
+            "system_tokens": int(r.system_tokens or 0),
+            "case_count": int(case_map.get(r.owner_id, 0)),
+        }
+        for r in usage_rows if r.owner_id
+    ]
+    by_user.sort(key=lambda x: x["total_tokens"], reverse=True)
+
+    base["by_model"] = by_model
+    base["by_user"] = by_user
+    return base
