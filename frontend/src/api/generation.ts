@@ -1,5 +1,6 @@
 import client from './client'
 import { getClientId } from '@/utils/clientId'
+import { getToken, redirectToLogin } from '@/utils/authToken'
 import type { GeneratedTestCase, TestCase } from '@/types/testCase'
 
 export interface GenerateRequest {
@@ -195,7 +196,15 @@ export const generationApi = {
   },
   // 重连到指定任务的事件流：先重放已产生事件，再接收实时事件。
   async streamTask(taskId: string, onEvent: (event: GenerateStreamEvent) => void, signal?: AbortSignal): Promise<void> {
-    const response = await fetch(`/api/v1/generate/stream/${taskId}`, { signal })
+    // SSE 走原生 fetch、不经 axios，拦截器对它无效，token 要在这里手动带上。
+    const headers: Record<string, string> = {}
+    const token = getToken()
+    if (token) headers.Authorization = `Bearer ${token}`
+    const response = await fetch(`/api/v1/generate/stream/${taskId}`, { signal, headers })
+    if (response.status === 401) {
+      redirectToLogin()
+      throw new Error('登录已过期，请重新登录')
+    }
     if (!response.ok || !response.body) {
       throw new Error(`连接任务失败：${response.status}`)
     }

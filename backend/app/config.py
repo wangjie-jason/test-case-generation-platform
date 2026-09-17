@@ -68,6 +68,17 @@ class Settings(BaseSettings):
     FEISHU_APP_SECRET: str = ""
     FEISHU_OPEN_API_BASE: str = "https://open.feishu.cn/open-apis"
 
+    # ── 多用户与认证 ──
+    # 首个管理员账号：库中无该用户时由启动流程自动创建（已存在绝不改密）。
+    ADMIN_USERNAME: str
+    ADMIN_PASSWORD: str
+    # JWT 签名密钥（HS256）。生成：python -c "import secrets;print(secrets.token_urlsafe(48))"
+    JWT_SECRET_KEY: str
+    # 个人 LLM api_key 的对称加密密钥（Fernet）。
+    # 生成：python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
+    LLM_CREDENTIAL_KEY: str
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 720  # 12 小时，一个工作日
+
     model_config = {"env_file": str(_ENV_PATH), "env_file_encoding": "utf-8"}
 
     @property

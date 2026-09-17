@@ -39,4 +39,8 @@ class LlmUsage(Base):
     # 归属的生成批次。生成任务落库拿到 batch_id 后由 task_service 回填，
     # clarify 等无批次的调用留 NULL。
     batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # 归属者 users.id：流水按人记账（我的/团队统计）。
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # 这通调用花的是谁的额度：'user' = 个人配置的 key，'system' = 全局兜底模型。
+    credential_source: Mapped[str | None] = mapped_column(String(10), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_local, index=True)

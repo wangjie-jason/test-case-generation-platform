@@ -8,3 +8,4 @@ from app.models.review_record import ReviewRecord  # noqa: F401
 from app.models.state_machine import StateMachine  # noqa: F401
 from app.models.term_mapping import TermMapping  # noqa: F401
 from app.models.test_case import TestCase  # noqa: F401
+from app.models.user import User, UserLlmConfig  # noqa: F401
