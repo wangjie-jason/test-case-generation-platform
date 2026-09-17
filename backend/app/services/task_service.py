@@ -6,7 +6,7 @@ import uuid as _uuid
 from app.database import async_session, now_local
 from app.models.test_case import TestCase
 from app.services import usage_service
-from app.services.generator_service import GeneratorService
+from app.services.pipeline_service import GeneratorService
 from app.services.indexing_service import IndexingService
 from app.services.llm_service import LLMServiceError
 

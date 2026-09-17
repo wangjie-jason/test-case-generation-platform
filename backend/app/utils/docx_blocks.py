@@ -1,9 +1,5 @@
 """docx 正文的块级遍历与纯文本渲染（只依赖 python-docx）。
 
-从 parser_service 抽出来，为的是让这条逻辑可测：parser_service 顶部 import 了
-httpx / pdfplumber 与 app.config（pydantic-settings），测试一 import 就得装全量运行时
-依赖，而 CI 只装 pytest。同 case_grouping 的处理方式。
-
 为什么不能直接用 python-docx 的现成接口——三个坑叠在一起，表格会静默消失：
   · doc.paragraphs 只返回 body 顶层段落，跳过表格内的段落；
   · doc.tables 只返回 body 顶层表格，不含单元格里嵌套的表格；

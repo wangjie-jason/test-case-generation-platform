@@ -39,8 +39,7 @@ def run_migrations() -> None:
     （声明「建表那步早已完成」），再 upgrade 只跑 0002 补列。新库则正常从 0001 建起。
 
     注意：多 worker 并发 upgrade 会撞 alembic_version 表，本项目单 uvicorn 进程，无此顾虑。
-    alembic 在此函数内延迟 import——CI 只装 pytest（不装 requirements.txt），而本模块被
-    generator_service 等间接 import，顶部 import alembic 会让轻量测试直接 ModuleNotFoundError。
+    alembic 在此函数内延迟 import——只有跑迁移时才需要，而本模块被多处间接 import。
     """
     from alembic import command
     from alembic.config import Config

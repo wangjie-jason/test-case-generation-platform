@@ -7,8 +7,7 @@ from typing import AsyncGenerator
 import httpx
 
 from app.config import settings
-# 只用采集函数，故直接指向纯逻辑模块而不是 services.usage_service——后者依赖
-# sqlalchemy，而 CI 只装 pytest，从这里牵进 sqlalchemy 会让轻量测试无法 import。
+# 只用采集函数，直接指向纯逻辑 app.utils.token_usage，不经依赖 sqlalchemy 的 usage_service。
 from app.utils import token_usage
 
 

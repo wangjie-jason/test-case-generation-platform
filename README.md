@@ -86,23 +86,6 @@ ipconfig getifaddr en0
 - 内网 IP 由 DHCP 分配，换网络或重连后可能变化，变了要重新告知同事。
 - **当前没有任何鉴权**：拿到地址的人都能用你的 LLM Key 发起生成（真实花钱），也能看到并删除知识库与所有用例批次。知识库、批次、用例是**全局共享的一个工作区**——`client_id`（`app/routers/generation.py`）只隔离「进行中的任务」，不隔离数据。仅限可信内网使用。
 
-### 跑测试
-
-```bash
-# 首次需装测试依赖
-source venv/bin/activate && pip install -r backend/requirements-dev.txt
-
-cd backend && pytest
-```
-
-排序规则（`app/utils/case_ordering.py`）有回归测试守着——「只挪补充用例、原有用例位置一律不动」这个承诺曾连漏两次（PR #52 漏了路径层、#53 漏了同级/后代之分），改动排序逻辑后请务必跑一遍。
-
-测试只装 `pytest` 就能跑，不需要 `requirements.txt` 里的 chromadb / sentence-transformers：排序与归位是纯字符串逻辑，为此把 `case_grouping` 从 `generator_service` 抽了出来（后者顶部 import ChromaStore，一 import 就会拉起约 433 MB 的向量库依赖）。若新增测试确实需要 fastapi/sqlalchemy，改 `.github/workflows/ci.yml` 里的安装步骤。
-
-### CI
-
-`.github/workflows/ci.yml`：push 到 main 与向 main 提 PR 时自动跑两个 job——后端 `pytest`（Python 3.10）、前端 `npm ci && npm run build`（Node 18，`build` 脚本含 `vue-tsc` 类型检查）。
-
 ### Docker 部署
 
 ```bash

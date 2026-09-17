@@ -1,8 +1,0 @@
-# 开发/测试依赖（运行时不需要，故与 requirements.txt 分开，也不进 Docker 镜像）
-# 安装：pip install -r requirements.txt -r requirements-dev.txt
-# 跑测试：cd backend && pytest
-pytest==9.1.*
-
-# python-docx 同时也是运行时依赖（见 requirements.txt），在这里重复一次是因为 CI 只装本文件：
-# test_docx_parsing 要真造 docx 才能验证嵌套表格的提取。轮子约 250 KB，不影响 CI 时长。
-python-docx==1.1.*

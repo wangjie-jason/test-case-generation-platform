@@ -1,15 +1,12 @@
 """LLM token 用量的**采集**逻辑（纯 Python，不依赖 sqlalchemy）。
 
-为什么与 `services/usage_service.py` 分开：CI 只装 pytest，不装 requirements.txt
-（避开 chromadb 约 433 MB 与 sentence-transformers 带的 torch）。usage_service 需要
-sqlalchemy 做聚合查询，测试一 import 就 ModuleNotFoundError。而采集本身只是
-contextvars + dict 处理，与数据库无关——照 v0.23 抽 `case_grouping` 的先例拆出来，
-测试只 import 本模块即可轻量跑。
+落库与聚合在 `services/usage_service.py`（需要 sqlalchemy）；采集本身只是
+contextvars + dict 处理，与数据库无关，故单独成模块。
 
 采集为什么走 contextvars 而不是改调用签名：`LLMService()` 在 5 个地方各自 new
 （clarify / 模块拆分 / 生成 / 评审 / 补充），其中三处还跑在 `asyncio.create_task`
 起的并发 worker 里。要把「这次消耗归属于哪个阶段」层层透传，就得改遍
-generator_service 里所有 worker 的签名和 `_parallel_agents` 的协议——收益全无。
+生成流水线所有 worker 的签名和 `_parallel_agents` 的协议——收益全无。
 contextvars 天然满足这里的需求：`create_task` 会复制创建时的上下文，因此
 ① 在 task_service 顶层装一次收集器，所有并发 worker 都能写进同一个 sink；
 ② 每个 worker 内部 `stage()` 只影响自己的上下文副本，并发下不会互相串台。
@@ -68,7 +65,7 @@ def stage(name: str) -> Iterator[None]:
 def record(model: str, usage: dict) -> None:
     """把服务端上报的一段 usage 记进当前 sink。没装收集器时静默跳过。
 
-    静默跳过是有意的：llm_service 是通用封装，脚本或测试里直接调它不该因为
+    静默跳过是有意的：llm_service 是通用封装，脚本或其它调用方直接调它不该因为
     没有采集上下文就报错。代价是漏采，但漏采只影响统计，不影响生成本身。
     """
     sink = _sink.get()

@@ -5,7 +5,7 @@ from app.vectorstore.chroma_client import ChromaStore
 
 logger = logging.getLogger(__name__)
 
-# 各集合名与检索侧（retrieval_service / generator_service）保持一致。
+# 各集合名与检索侧（retrieval_service / pipeline 各 service）保持一致。
 PRD_COLLECTION = "prd_documents"
 DEFECT_COLLECTION = "defect_records"
 CASE_COLLECTION = "historical_cases"
