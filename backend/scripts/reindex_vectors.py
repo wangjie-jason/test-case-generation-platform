@@ -5,6 +5,10 @@
 
 向量库是「补充检索」用的，主存储仍是 SQLite；本脚本可重复执行，
 upsert 以 source_id 为键覆盖，不会产生重复。
+
+多用户改造后，历史用例向量带 owner_id 做 few-shot 按人隔离；升级后需对
+存量库跑一次本脚本补齐该 metadata（跑之前历史向量因缺 owner_id 会被检索过滤，
+不泄密，只是暂时少了 few-shot 示例）。
 """
 import asyncio
 import logging

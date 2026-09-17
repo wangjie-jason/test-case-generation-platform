@@ -147,7 +147,8 @@ class TaskManager:
                 async with async_session() as db:
                     try:
                         async for event in GeneratorService.generate_stream(
-                            db, task.requirement_text, kb_ids=task.kb_ids or None
+                            db, task.requirement_text, kb_ids=task.kb_ids or None,
+                            owner_id=task.owner_id,
                         ):
                             if event.get("type") == "complete":
                                 batch_id = await persist_cases(

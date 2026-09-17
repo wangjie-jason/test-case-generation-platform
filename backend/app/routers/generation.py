@@ -19,7 +19,7 @@ from app.schemas.generation import (
 )
 from app.models.user import User
 from app.routers.deps import get_current_user
-from app.services import llm_credential_service, usage_service
+from app.services import access_service, llm_credential_service, usage_service
 from app.services.excel_service import ExcelExportService
 from app.services.pipeline_service import GeneratorService
 from app.services.llm_service import LLMServiceError
@@ -31,6 +31,14 @@ from app.utils.llm_credentials import CredentialNotConfiguredError
 router = APIRouter()
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+async def _get_owned_case_or_404(db: AsyncSession, case_id: str, user: User) -> TestCase:
+    tc = await db.get(TestCase, case_id)
+    # 不属于本人一律 404，不泄露他人用例的存在性。
+    if not tc or tc.owner_id != user.id:
+        raise HTTPException(404, "用例不存在")
+    return tc
 
 
 def _case_payload(tc: TestCase, review: dict | None) -> dict:
@@ -55,24 +63,25 @@ def _case_payload(tc: TestCase, review: dict | None) -> dict:
 
 
 async def _resolve_insert_ts(db: AsyncSession, batch_id: str,
-                             prev_id: str | None, next_id: str | None) -> datetime:
+                             prev_id: str | None, next_id: str | None,
+                             owner_id: str) -> datetime:
     """算手动插入用例的 created_at——列表按 created_at 升序展示，所以时间戳就是位置。
     - 传了 prev/next：取两者中点
     - 只传 prev（末尾追加）：prev + 1 秒
     - 只传 next（开头插入）：next - 1 秒
     - 都不传：当前时间（等价于末尾追加）
-    锚点不属于本批次时忽略该锚点，避免跨批次插错位置。
+    锚点不属于本批次/本人时忽略，避免跨批次或越权插错位置。
     多次插入同位置时中点会逐渐收敛到同一微秒，SQLite 此时按 rowid 插入顺序返回，
     额外插入的几条天然排在一起，不影响业务。"""
     prev_ts: datetime | None = None
     next_ts: datetime | None = None
     if prev_id:
         prev_case = await db.get(TestCase, prev_id)
-        if prev_case and prev_case.batch_id == batch_id:
+        if prev_case and prev_case.batch_id == batch_id and prev_case.owner_id == owner_id:
             prev_ts = prev_case.created_at
     if next_id:
         next_case = await db.get(TestCase, next_id)
-        if next_case and next_case.batch_id == batch_id:
+        if next_case and next_case.batch_id == batch_id and next_case.owner_id == owner_id:
             next_ts = next_case.created_at
 
     if prev_ts is not None and next_ts is not None:
@@ -100,7 +109,9 @@ async def generate_clarify(
         # 「累计」会明显小于账单。无批次归属，流水的 batch_id 留 NULL。
         with llm_credentials.bind(creds), usage_service.collector() as usage_records:
             try:
-                clarified = await GeneratorService.clarify(db, body.requirement_text, kb_ids=body.kb_ids if body.kb_ids else None)
+                kb_ids = await access_service.resolve_kb_ids(db, user, body.kb_ids or None)
+                clarified = await GeneratorService.clarify(
+                    db, body.requirement_text, kb_ids=kb_ids, owner_id=user.id)
             finally:
                 await usage_service.flush(db, usage_records, owner_id=user.id)
     except LLMServiceError as exc:
@@ -121,8 +132,10 @@ async def generate_async(
         creds = await llm_credential_service.resolve_credentials(db, user.id)
     except CredentialNotConfiguredError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # 自报的 kb_ids 收敛到可见集合，越界 400。
+    kb_ids = await access_service.resolve_kb_ids(db, user, body.kb_ids or None)
     task = TaskManager.create(
-        body.requirement_text, body.batch_name, body.kb_ids if body.kb_ids else None,
+        body.requirement_text, body.batch_name, kb_ids,
         owner_id=user.id, creds=creds,
     )
     return task.summary()
@@ -157,8 +170,8 @@ async def generate_stream_reconnect(task_id: str, user: User = Depends(get_curre
 
 
 @router.get("/cases/batches")
-async def list_batches(db: AsyncSession = Depends(get_db)):
-    """按 batch_id 汇总所有历史批次：一次返回每批的总数/最新时间/需求文本。
+async def list_batches(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """按 batch_id 汇总当前用户的历史批次：一次返回每批的总数/最新时间/需求文本。
     历史/审核页用这个先渲染批次卡（折叠态），展开某批时再走 /cases?batch_id=xxx
     拉该批的用例明细，避免一次拉全被 limit 截断（旧的 /cases 写死 200 就是这个坑）。"""
     # 用聚合查询代替"拉全部再前端 group by"，即使批次上万也只回几百行。
@@ -169,6 +182,7 @@ async def list_batches(db: AsyncSession = Depends(get_db)):
             func.max(TestCase.created_at).label("created_at"),
             func.max(TestCase.req_text).label("req_text"),
         )
+        .where(TestCase.owner_id == user.id)
         .group_by(TestCase.batch_id)
         .order_by(func.max(TestCase.created_at).desc())
     )
@@ -182,6 +196,7 @@ async def list_batches(db: AsyncSession = Depends(get_db)):
             func.sum(case((ReviewRecord.status == "approved", 1), else_=0)).label("approved"),
         )
         .join(ReviewRecord, ReviewRecord.case_id == TestCase.id)
+        .where(TestCase.owner_id == user.id)
         .group_by(TestCase.batch_id)
     )
     review_map = {row.batch_id: (row.reviewed or 0, row.approved or 0) for row in (await db.execute(review_stmt)).all()}
@@ -189,7 +204,7 @@ async def list_batches(db: AsyncSession = Depends(get_db)):
     # 每批的 token 消耗：一次 GROUP BY 出全部批次，避免 N+1。
     # 该功能上线前的历史批次没有流水，取不到就是 None——前端对 None 不显示，
     # 不拿 0 冒充「这批没花 token」。
-    token_map = await usage_service.batch_tokens(db)
+    token_map = await usage_service.batch_tokens(db, user.id)
 
     result = []
     for row in rows:
@@ -207,14 +222,22 @@ async def list_batches(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/cases")
-async def list_cases(batch_id: str, db: AsyncSession = Depends(get_db)):
-    """列出某批次的全部用例（无上限，一次拉完）。batch_id 必填——
+async def list_cases(batch_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """列出某批次的全部用例（无上限，一次拉完）。batch_id 必填且必须属于当前用户——
     历史/审核页先调 /cases/batches 拿汇总，再对展开的那一批调本接口拉明细。
     早先允许不传 batch_id 返回最近 5000 条概览，前端已全部改走批次维度，该分支已移除。"""
+    # 先确认批次归属：不属于本人时返回 404（不泄露他人批次的存在）。
+    owns = await db.scalar(
+        select(TestCase.id).where(TestCase.batch_id == batch_id, TestCase.owner_id == user.id).limit(1)
+    )
+    if not owns:
+        raise HTTPException(404, "批次不存在")
     # 批次详情按 case 生成顺序展示（LLM 逐条产出的自然顺序），与"生成结果"页一致。
     # 同一批 case 是在 persist_cases 里几乎同时写入的，用 created_at ASC 就等于生成顺序。
     # 手动插入的 case 通过 created_at = 前后两条中点，自然排到目标位置。
-    stmt = select(TestCase).where(TestCase.batch_id == batch_id).order_by(TestCase.created_at.asc())
+    stmt = select(TestCase).where(
+        TestCase.batch_id == batch_id, TestCase.owner_id == user.id
+    ).order_by(TestCase.created_at.asc())
     cases = (await db.execute(stmt)).scalars().all()
     case_ids = [c.id for c in cases]
     review_map = {}
@@ -225,16 +248,14 @@ async def list_cases(batch_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/cases/{case_id}")
-async def update_case(case_id: str, data: UpdateCaseRequest, db: AsyncSession = Depends(get_db)):
+async def update_case(case_id: str, data: UpdateCaseRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """审核阶段的人工微调：允许改 title/priority/precondition/steps/expected_result 五字段。
     编辑只改用例内容 + 打 edited 标记，不碰 review 记录。
     好处：
     - 原始 reject_reason（如 context_missing）保留不丢，AI 训练信号完整
     - 已 reject 的 case 编辑后内容已补全，前端可据此让它出现在导出中
     - 已 approve 的 case 编辑后仍是 approved，只是多一个「已编辑」标记"""
-    tc = await db.get(TestCase, case_id)
-    if not tc:
-        raise HTTPException(404, "用例不存在")
+    tc = await _get_owned_case_or_404(db, case_id, user)
 
     # 只接受这五个字段；未传的字段保持原值，允许只改一处。前端目前是整表提交，
     # 但接口设计成 patch 语义，方便后续做 inline 快改。priority 允许改成 None（清空）。
@@ -267,7 +288,7 @@ async def update_case(case_id: str, data: UpdateCaseRequest, db: AsyncSession = 
 
 
 @router.post("/cases")
-async def create_case(data: CreateCaseRequest, db: AsyncSession = Depends(get_db)):
+async def create_case(data: CreateCaseRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """审核时手动插入用例。前端传 batch_id + 内容字段 + 可选 prev_case_id/next_case_id 锚点。
     定位策略见 _resolve_insert_ts：新 case 的 created_at 落在前后两条之间，自然排到目标位置。
     手动插入的 case source='manual'、edited=True、review 直接置 approved。"""
@@ -276,10 +297,14 @@ async def create_case(data: CreateCaseRequest, db: AsyncSession = Depends(get_db
     if not title:
         raise HTTPException(400, "title 必填")
 
-    new_ts = await _resolve_insert_ts(db, batch_id, data.prev_case_id, data.next_case_id)
+    # 批次必须属于本人，否则 404（不能往他人批次插用例）。
+    batch_ref = (await db.execute(
+        select(TestCase).where(TestCase.batch_id == batch_id, TestCase.owner_id == user.id).limit(1)
+    )).scalar_one_or_none()
+    if not batch_ref:
+        raise HTTPException(404, "批次不存在")
 
-    # 拿该批任一条 case 抄 req_text，保持批次上下文一致（生成时都是同一个需求）
-    batch_ref = (await db.execute(select(TestCase).where(TestCase.batch_id == batch_id).limit(1))).scalar_one_or_none()
+    new_ts = await _resolve_insert_ts(db, batch_id, data.prev_case_id, data.next_case_id, user.id)
 
     steps = data.steps or ""
     if isinstance(steps, list):
@@ -296,6 +321,7 @@ async def create_case(data: CreateCaseRequest, db: AsyncSession = Depends(get_db
         edited_at=now_local(),
         created_at=new_ts,
         batch_id=batch_id,
+        owner_id=user.id,
         req_text=batch_ref.req_text if batch_ref else None,
         kb_id=batch_ref.kb_id if batch_ref else None,
     )
@@ -311,9 +337,8 @@ async def create_case(data: CreateCaseRequest, db: AsyncSession = Depends(get_db
 
 
 @router.post("/cases/{case_id}/review")
-async def review_case(case_id: str, data: ReviewCaseRequest, db: AsyncSession = Depends(get_db)):
-    tc = await db.get(TestCase, case_id)
-    if not tc: raise HTTPException(404, "用例不存在")
+async def review_case(case_id: str, data: ReviewCaseRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    tc = await _get_owned_case_or_404(db, case_id, user)
     status = data.status
     rr = await db.execute(select(ReviewRecord).where(ReviewRecord.case_id == case_id))
     rec = rr.scalars().first()
@@ -349,17 +374,46 @@ async def parse_prd(
 
 
 @router.get("/stats/overview")
-async def stats_overview(db: AsyncSession = Depends(get_db)):
-    total = (await db.execute(select(TestCase))).scalars().all()
+async def stats_overview(scope: str = "me", user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """统计概览。scope=me（默认）只含本人；scope=team 全员汇总（所有人可见，
+    但只给聚合计数与按模型/按人拆分，不含他人批次明细）。"""
+    is_team = scope == "team"
+    owner_id = None if is_team else user.id
+
+    case_stmt = select(TestCase)
+    if owner_id is not None:
+        case_stmt = case_stmt.where(TestCase.owner_id == owner_id)
+    total = (await db.execute(case_stmt)).scalars().all()
     total_n = len(total)
     # 批次数按 batch_id 去重，不能复用 total_n——那是用例条数，两者语义不同。
     batch_n = len({c.batch_id for c in total if c.batch_id})
-    approved = (await db.execute(select(ReviewRecord).where(ReviewRecord.status == "approved"))).scalars().all()
-    rejected = (await db.execute(select(ReviewRecord).where(ReviewRecord.status == "rejected"))).scalars().all()
-    reviewed = len(approved) + len(rejected)
-    dist = {}
+
+    # 审核记录本身没有 owner，join 用例按人过滤。
+    review_stmt = select(ReviewRecord).join(TestCase, ReviewRecord.case_id == TestCase.id)
+    if owner_id is not None:
+        review_stmt = review_stmt.where(TestCase.owner_id == owner_id)
+    reviews = (await db.execute(review_stmt)).scalars().all()
+    approved_n = sum(1 for r in reviews if r.status == "approved")
+    rejected = [r for r in reviews if r.status == "rejected"]
+    reviewed = len(reviews)
+    dist: dict[str, int] = {}
     for r in rejected:
-        # reject_reason 现在有一个特殊值 'edited'：代表 AI 一次没到位、人工微调后可用，
-        # 归类到「不通过」但和幻觉/丢弃并列展示，便于识别「差一点点」的用例占比。
+        # reject_reason 有一个特殊值 'edited'：AI 一次没到位、人工微调后可用，
+        # 归到「不通过」但和幻觉/丢弃并列展示。
         if r.reject_reason: dist[r.reject_reason] = dist.get(r.reject_reason, 0) + 1
-    return {"total_cases": total_n, "reviewed_cases": reviewed, "approved_cases": len(approved), "rejected_cases": len(rejected), "usability_rate": round((len(approved) / reviewed * 100) if reviewed > 0 else 0), "hallucination_distribution": dist, "generation_count": batch_n, "token_usage": await usage_service.summary(db)}
+
+    token_usage = (
+        await usage_service.team_usage(db) if is_team
+        else await usage_service.summary(db, owner_id=user.id)
+    )
+    return {
+        "scope": "team" if is_team else "me",
+        "total_cases": total_n,
+        "reviewed_cases": reviewed,
+        "approved_cases": approved_n,
+        "rejected_cases": len(rejected),
+        "usability_rate": round((approved_n / reviewed * 100) if reviewed > 0 else 0),
+        "hallucination_distribution": dist,
+        "generation_count": batch_n,
+        "token_usage": token_usage,
+    }

@@ -27,7 +27,9 @@ class IndexingService:
     @staticmethod
     async def index_case(case) -> None:
         text = "\n".join(p for p in [case.title, case.precondition, case.steps, case.expected_result] if p)
-        await _safe_upsert(CASE_COLLECTION, text, case.id, case.kb_id)
+        # historical_cases 的 few-shot 按人隔离：metadata 带 owner_id，检索时只命中本人历史。
+        extra = {"owner_id": case.owner_id} if getattr(case, "owner_id", None) else None
+        await _safe_upsert(CASE_COLLECTION, text, case.id, case.kb_id, extra)
 
     @staticmethod
     async def remove(collection: str, source_id: str) -> None:
@@ -36,11 +38,23 @@ class IndexingService:
         except Exception:
             logger.exception("向量删除失败 collection=%s id=%s", collection, source_id)
 
+    @staticmethod
+    async def remove_kb(collection: str, kb_id: str) -> None:
+        try:
+            await asyncio.to_thread(ChromaStore().delete_by_kb, collection, kb_id)
+        except Exception:
+            logger.exception("向量按知识库删除失败 collection=%s kb=%s", collection, kb_id)
 
-async def _safe_upsert(collection: str, text: str, source_id: str, kb_id: str | None) -> None:
+
+async def _safe_upsert(collection: str, text: str, source_id: str, kb_id: str | None,
+                       extra_meta: dict | None = None) -> None:
     if not text.strip():
         return
-    meta = {"kb_id": kb_id} if kb_id else {}
+    meta = {}
+    if kb_id:
+        meta["kb_id"] = kb_id
+    if extra_meta:
+        meta.update(extra_meta)
     try:
         await asyncio.to_thread(ChromaStore().upsert_texts, collection, [text], [meta], [source_id])
     except Exception:

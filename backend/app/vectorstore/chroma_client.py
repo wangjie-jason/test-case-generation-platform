@@ -134,8 +134,13 @@ class ChromaStore:
 
         collection.upsert(ids=all_ids, documents=all_chunks, embeddings=embeddings, metadatas=all_metas)
 
-    def search(self, collection_name: str, query: str, top_k: int = 5, kb_ids: list[str] | None = None) -> list[dict]:
-        """语义检索；模型或 ChromaDB 不可用时返回空列表。"""
+    def search(self, collection_name: str, query: str, top_k: int = 5,
+               kb_ids: list[str] | None = None, where_extra: dict | None = None) -> list[dict]:
+        """语义检索；模型或 ChromaDB 不可用时返回空列表。
+
+        kb_ids 转成 kb_id 的 $in 过滤；where_extra 是额外的等值条件（如
+        {"owner_id": uid}），多个条件用 $and 合并。
+        """
         embed_fn = self._get_embedding_fn()
         if not self._model_ready:
             self._model_ready_event.wait(timeout=30)
@@ -155,7 +160,17 @@ class ChromaStore:
             if hasattr(qe, "tolist"):
                 qe = qe.tolist()
 
-            where = {"kb_id": {"$in": kb_ids}} if kb_ids else None
+            clauses: list[dict] = []
+            if kb_ids:
+                clauses.append({"kb_id": {"$in": kb_ids}})
+            if where_extra:
+                clauses.append(where_extra)
+            if len(clauses) == 1:
+                where = clauses[0]
+            elif clauses:
+                where = {"$and": clauses}
+            else:
+                where = None
             kwargs = {"where": where} if where else {}
             results = collection.query(query_embeddings=qe, n_results=top_k, include=["documents", "metadatas", "distances"], **kwargs)
             items = []
@@ -185,3 +200,18 @@ class ChromaStore:
                 collection.delete(ids=results["ids"])
         except Exception:
             logger.exception("ChromaDB 删除来源文档失败")
+
+    def delete_by_kb(self, collection_name: str, kb_id: str):
+        """删除某知识库在该集合下的全部向量（删库时显式级联用）。"""
+        self._ensure_client()
+        if self._client is None:
+            return
+        collection = self._get_collection(collection_name)
+        if collection is None:
+            return
+        try:
+            results = collection.get(where={"kb_id": kb_id})
+            if results["ids"]:
+                collection.delete(ids=results["ids"])
+        except Exception:
+            logger.exception("ChromaDB 按知识库删除失败 collection=%s kb=%s", collection_name, kb_id)
