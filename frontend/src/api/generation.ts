@@ -119,14 +119,34 @@ export interface TokenUsage {
   total_tokens: number
   // 推理模型的思考 token（已含在 completion 内），用于判断高 reasoning_effort 值不值。
   reasoning_tokens: number
+  // 其中走系统兜底模型（公司额度）的消耗。
+  system_tokens?: number
   calls: number
   by_stage: TokenUsageByStage[]
+  // 团队视图才有：按模型与按人拆分。
+  by_model?: TokenUsageByModel[]
+  by_user?: TokenUsageByUser[]
   // 首条流水的时间。为 null 说明还没采到数据，前端据此提示「统计自 X 起」，
   // 免得把「累计 0」误读成「一次都没生成过」。
   since: string | null
 }
 
+export interface TokenUsageByModel {
+  model: string
+  tokens: number
+  calls: number
+}
+
+export interface TokenUsageByUser {
+  user_id: string
+  username: string
+  total_tokens: number
+  system_tokens: number
+  case_count: number
+}
+
 export interface StatsOverview {
+  scope?: 'me' | 'team'
   total_cases: number
   reviewed_cases: number
   approved_cases: number
@@ -236,5 +256,7 @@ export const generationApi = {
   exportCases(cases: CaseRecord[] | GeneratedTestCase[]) {
     return client.post<any, Blob>('/cases/export', { cases }, { responseType: 'blob' })
   },
-  statsOverview() { return client.get<any, StatsOverview>('/stats/overview') },
+  statsOverview(scope: 'me' | 'team' = 'me') {
+    return client.get<any, StatsOverview>('/stats/overview', { params: { scope } })
+  },
 }

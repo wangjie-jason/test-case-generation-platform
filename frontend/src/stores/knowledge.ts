@@ -12,8 +12,8 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
   const loadingDetails = ref(false)
 
   async function fetchKbs() { kbs.value = await kbApi.list() }
-  async function createKb(data: { name: string; description?: string }) { const kb = await kbApi.create(data); kbs.value.push(kb); return kb }
-  async function updateKb(id: string, data: { name?: string; description?: string | null }) {
+  async function createKb(data: { name: string; description?: string; visibility: 'team' | 'personal' }) { const kb = await kbApi.create(data); kbs.value.push(kb); return kb }
+  async function updateKb(id: string, data: { name?: string; description?: string | null; visibility?: 'team' | 'personal' }) {
     const updated = await kbApi.update(id, data)
     const i = kbs.value.findIndex(k => k.id === id)
     if (i >= 0) kbs.value[i] = updated
