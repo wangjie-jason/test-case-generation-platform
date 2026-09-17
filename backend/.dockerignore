@@ -1,0 +1,35 @@
+# 密钥与环境配置：运行时由 docker-compose 的 env_file 注入，绝不进镜像层
+.env
+.env.*
+
+# 数据与上传：容器内走挂载卷 /app/data、/app/uploads，宿主机文件不进镜像
+data/
+uploads/
+
+# SQLite 库文件与备份（双重保险，data/ 之外的散落文件也挡住）
+*.db
+*.db.bak*
+*.db-wal
+*.db-shm
+
+# Python 缓存与虚拟环境（**/ 前缀确保任意层级的同名目录都被排除，
+# 只写 __pycache__/ 在实测中挡不住 app/services/__pycache__ 这类子目录）
+**/__pycache__/
+__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/*.egg-info/
+venv/
+.venv/
+
+# 版本控制 / 编辑器 / 系统文件
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+
+# Docker 自身
+Dockerfile
+.dockerignore

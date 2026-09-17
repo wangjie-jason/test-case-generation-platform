@@ -1,0 +1,18 @@
+# 依赖与构建产物：镜像内重新 npm ci / build，宿主机的不进构建上下文
+node_modules/
+dist/
+.vite/
+
+# 日志与系统文件
+*.log
+.DS_Store
+
+# 版本控制 / 编辑器
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Docker 自身
+Dockerfile
+.dockerignore

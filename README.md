@@ -89,8 +89,13 @@ ipconfig getifaddr en0
 ### Docker 部署
 
 ```bash
-docker-compose up
+# 首次：准备运行时配置（含 LLM key、飞书凭据等），按注释填入真实值
+cp backend/.env.example backend/.env
+
+docker compose up -d --build
 ```
+
+`backend/.env` 只在运行时通过 compose 的 `env_file` 注入容器；`backend/.dockerignore` 保证它和 `data/` 数据库不会被打进镜像层。
 
 ## 功能模块
 
