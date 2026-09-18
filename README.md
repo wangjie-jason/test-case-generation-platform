@@ -1,6 +1,6 @@
 # Test Case Generation Platform
 
-基于知识库驱动的 AI 测试用例生成工具，将生成可用率从 <30% 提升至 85%+。
+基于知识库驱动的 AI 测试用例生成工具，将生成可用率从 <30% 提升至 85%+。支持多人使用：账号登录、个人大模型凭据（花自己的额度）或系统统一兜底、知识库分团队/个人、批次与统计按人隔离。
 
 ## 技术栈
 
@@ -8,9 +8,10 @@
 | -------- | ------------------------------------------------------- |
 | 前端     | Vue 3 + Element Plus + Pinia + TypeScript               |
 | 后端     | Python 3.10+ + FastAPI (async)                          |
-| 数据库   | SQLite (dev)                                            |
+| 数据库   | SQLite（WAL 模式，Alembic 迁移）                         |
 | 向量库   | ChromaDB                                                |
 | LLM      | 任意 OpenAI 兼容 API（DeepSeek / 智谱 GLM / OpenAI 等） |
+| 认证     | JWT（PyJWT, HS256）+ bcrypt；个人 API Key 经 Fernet 加密 |
 | 文档解析 | pdfplumber + python-docx                                |
 
 ## 快速开始
@@ -33,14 +34,35 @@ source venv/bin/activate
 pip install -r backend/requirements.txt
 ```
 
-### 3. 配置 API Key
+### 3. 配置环境变量
 
 ```bash
-# 在项目根目录执行；复制模板后填入自己的密钥（任意 OpenAI 兼容服务均可）
+# 在项目根目录执行；复制模板后按注释填入
 cp backend/.env.example backend/.env
 ```
 
-`backend/.env` 默认示例为 OpenAI，按需改成你用的服务，例如智谱 GLM：
+多用户版本有几个**必填项，不填后端无法启动**：
+
+```bash
+# 生成 JWT 签名密钥和个人 API Key 的加密密钥（Fernet），各执行一次，填进 backend/.env
+python3 -c "import secrets;print(secrets.token_urlsafe(48))"
+python3 -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
+```
+
+```ini
+# backend/.env
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=please-change-me   # 首个管理员，仅库中不存在时创建，启动后请改掉
+JWT_SECRET_KEY=<上面第一条命令的输出>
+LLM_CREDENTIAL_KEY=<上面第二条命令的输出>
+```
+
+大模型凭据有两种配法：
+
+- **系统兜底模型**（本地开发推荐）：直接在 `.env` 填 `LLM_API_KEY/LLM_BASE_URL/LLM_MODEL`，所有人默认走它；
+- **个人凭据**：留空兜底，启动后登录在「设置」页填自己的 key（花自己的额度）。个人与兜底都未配置时不能生成。
+
+`.env` 默认示例为 OpenAI，按需改成你用的服务，例如智谱 GLM：
 
 ```ini
 LLM_API_KEY=your-key-here
@@ -67,7 +89,7 @@ cd frontend && npm run dev
 
 数据库结构由 Alembic 管理，启动时自动迁移（新库建表、老库自动识别并补列），无需手工执行任何命令。
 
-打开 http://localhost:3000
+打开 http://localhost:3000，用 `.env` 里的首个管理员账号登录（模板默认 `admin` / `please-change-me`，登录后可在「设置」改密）。
 
 ### 让局域网内的同事访问
 
@@ -124,39 +146,52 @@ tar czf /backup/chroma-$(date +%F).tgz -C ./data chromadb
 
 ## 功能模块
 
-### 首页看板
-用例总数、可用率、幻觉分布、生成批次统计 + 平台功能介绍
+### 账号与凭据
+- 登录后使用（JWT 有效期 12 小时，过期自动跳登录页）；管理员可建号、设管理员、停用/启用、重置密码（账号只停用不删除）
+- 「设置」页配置**个人大模型凭据**（OpenAI 兼容 base_url / key / model，加密存储、只显示掩码，可先测连通性）；未配置时使用系统兜底模型，两者都没有则不能生成
+- 可随时清除个人配置回到系统兜底；个人 key 出错不会自动降级花公司额度
+
+### 首页看板（统计）
+- 用例总数、可用率、幻觉分布、token 消耗（今日/本周/累计、思考占比、按阶段拆分）
+- 「我的 / 团队」两视图：团队视图汇总全员数据，另有按模型、按成员消耗，不暴露他人批次明细
 
 ### 用例生成
-- 粘贴文本 / 上传 PRD（PDF/Word/MD/TXT）
-- 选择知识库限定检索范围
+- 粘贴文本 / 上传 PRD（PDF/Word/MD/TXT，支持飞书链接导入）
+- 选择知识库限定检索范围（只列出团队库 + 我的个人库）
 - **需求补全**（可选）：需求描述简略时，先用知识库把缺失逻辑（字段约束/业务规则/状态流转/异常边界/回归风险）补成结构化完整需求，可编辑确认后再生成，减少用例遗漏
 - 六大测试技术：等价类、边界值、决策表、状态迁移、错误推测、组合测试
 - 生成后由 AI 以测试专家身份**评审**：删掉有问题的用例、针对缺口补充新用例（保留合格用例不改写）
-- **并行生成**：可同时发起多个生成任务、互不阻塞；切换页面/刷新后自动重连续看进度；多人各自浏览器任务隔离
-- 下载 Excel（用例标题 / 等级 / 前置条件 / 步骤 / 预期结果）
+- **并行生成**：可同时发起多个生成任务、互不阻塞；切换页面/刷新后自动重连续看进度；任务与批次按人隔离
+- 下载 Excel（用例标题 / 等级 / 前置条件 / 步骤 / 预期结果，支持全部/仅通过）
 
 ### 审核标注
-按批次分组，Tab 筛选，五种幻觉归因，批量操作
+按批次分组（只含自己的批次），Tab 筛选，五种幻觉归因，可微调文案、手工补充用例
 
 ### 知识库
-卡片式管理，支持 PRD文档、缺陷记录、字段字典、业务规则、状态机、术语映射
+卡片式管理，支持 PRD文档、缺陷记录、字段字典、业务规则、状态机、术语映射：
+- **团队库**：全员可见、可被生成引用，仅创建者和管理员能改/删（其他人进入为只读）
+- **个人库**：仅本人可见，管理员也不可见
 
 ## 项目结构
 
 ```
-├── backend/app/
-│   ├── main.py          # FastAPI 入口
-│   ├── config.py        # 配置
-│   ├── models/          # 数据模型
-│   ├── routers/         # API 路由
-│   ├── services/        # 业务逻辑
-│   └── vectorstore/     # ChromaDB
+├── backend/
+│   ├── .env.example     # 运行时配置模板（复制为 .env，compose 经 env_file 注入）
+│   ├── alembic/         # 数据库迁移（启动时自动执行）
+│   ├── scripts/         # 运维脚本（删批次/重建向量/重排等）
+│   └── app/
+│       ├── main.py          # FastAPI 入口（迁移 + 首管理员 + 路由鉴权）
+│       ├── config.py        # 配置
+│       ├── models/          # 数据模型（含用户与个人凭据）
+│       ├── routers/         # API 路由（auth/admin_users/llm_config/generation/knowledge）
+│       ├── services/        # 业务逻辑（认证/加密/访问控制/生成流水线…）
+│       └── vectorstore/     # ChromaDB
 ├── frontend/src/
-│   ├── views/           # 页面视图
+│   ├── views/           # 页面（登录/看板/生成/审核/知识库/设置/用户管理）
 │   ├── components/      # 组件
-│   ├── stores/          # Pinia 状态
+│   ├── stores/          # Pinia 状态（auth/generation/knowledge）
 │   └── api/             # API 模块
+├── deploy/              # 网关 TLS 反代示例（含 SSE 参数）
 ├── DESIGN.md            # 设计方案
 ├── PLAN.md              # 实施计划
 └── docker-compose.yml
