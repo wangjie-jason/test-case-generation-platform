@@ -20,6 +20,8 @@ const props = defineProps<{
   create: (data: Record<string, any>) => Promise<unknown>
   update: (id: string, data: Record<string, any>) => Promise<unknown>
   remove: (id: string) => Promise<unknown>
+  // 只读（引用他人建的团队库）：隐藏新增/编辑/删除入口。服务端也已兜底 403。
+  readonly?: boolean
 }>()
 
 const dialogVisible = ref(false)
@@ -50,14 +52,14 @@ async function removeItem(id: string) {
 
 <template>
   <div>
-    <div style="margin-bottom:12px"><el-button @click="openCreate">+ {{ addLabel }}</el-button></div>
+    <div v-if="!readonly" style="margin-bottom:12px"><el-button @click="openCreate">+ {{ addLabel }}</el-button></div>
     <el-table :data="items" border stripe>
       <el-table-column v-for="column in columns" :key="column.prop"
                        :prop="column.display ? undefined : column.prop"
                        :label="column.label" :width="column.width" :align="column.align || 'left'">
         <template #default="{ row }"><slot :name="`cell-${column.prop}`" :row="row">{{ column.display ? '' : row[column.prop] }}</slot></template>
       </el-table-column>
-      <el-table-column label="操作" width="160">
+      <el-table-column v-if="!readonly" label="操作" width="160">
         <template #default="{ row }">
           <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
           <el-button link type="danger" @click="removeItem(row.id)">删除</el-button>

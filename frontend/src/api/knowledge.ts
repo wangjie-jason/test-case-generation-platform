@@ -1,12 +1,12 @@
 import client from './client'
 import type { FieldDict, BusinessRule, StateMachine, TermMapping, PrdDocument, DefectRecord } from '@/types/knowledge'
-import type { KnowledgeBase } from '@/types/project'
+import type { KnowledgeBase, KbVisibility } from '@/types/project'
 
 // 知识库
 export const kbApi = {
   list() { return client.get<any, KnowledgeBase[]>("/knowledge-bases") },
-  create(data: { name: string; description?: string }) { return client.post<any, KnowledgeBase>('/knowledge-bases', data) },
-  update(id: string, data: { name?: string; description?: string | null }) { return client.put<any, KnowledgeBase>(`/knowledge-bases/${id}`, data) },
+  create(data: { name: string; description?: string; visibility: KbVisibility }) { return client.post<any, KnowledgeBase>('/knowledge-bases', data) },
+  update(id: string, data: { name?: string; description?: string | null; visibility?: KbVisibility }) { return client.put<any, KnowledgeBase>(`/knowledge-bases/${id}`, data) },
   delete(id: string) { return client.delete(`/knowledge-bases/${id}`) },
 }
 

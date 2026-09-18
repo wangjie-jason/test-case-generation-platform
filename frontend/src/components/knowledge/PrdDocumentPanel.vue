@@ -2,7 +2,7 @@
 import { ref, computed } from 'vue'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { ElMessage, ElMessageBox } from 'element-plus'
-const props = defineProps<{ kbId: string }>()
+const props = defineProps<{ kbId: string; readonly?: boolean }>()
 const store = useKnowledgeStore()
 const filters = computed(() => store.prdDocuments)
 
@@ -49,7 +49,7 @@ function preview(item: any) {
 </script>
 <template>
   <div>
-    <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+    <div v-if="!readonly" style="display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
       <el-upload :auto-upload="true" :show-file-list="false" :http-request="handleUpload" accept=".pdf,.docx,.md,.txt" :limit="1">
         <el-button type="primary">上传 PRD</el-button>
       </el-upload>
@@ -70,7 +70,10 @@ function preview(item: any) {
         <template #default="{ row }"><div style="max-height:40px;overflow:hidden;font-size:12px;color:#606266">{{ row.raw_text.slice(0, 150) }}</div></template>
       </el-table-column>
       <el-table-column label="操作" width="140">
-        <template #default="{ row }"><el-button link type="primary" @click="preview(row)">查看</el-button><el-button link type="danger" @click="handleDelete(row.id)">删除</el-button></template>
+        <template #default="{ row }">
+          <el-button link type="primary" @click="preview(row)">查看</el-button>
+          <el-button v-if="!readonly" link type="danger" @click="handleDelete(row.id)">删除</el-button>
+        </template>
       </el-table-column>
     </el-table>
     <el-empty v-if="!filters.length" description="暂无PRD文档" />

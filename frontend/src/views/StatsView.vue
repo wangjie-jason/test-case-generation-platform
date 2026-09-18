@@ -12,8 +12,11 @@ const stats = ref<StatsOverview>({
   usability_rate: 0,
   hallucination_distribution: {},
   generation_count: 0,
+  scope: 'me',
 })
 const loading = ref(false)
+const scope = ref<'me' | 'team'>('me')
+const isTeam = computed(() => scope.value === 'team')
 
 const hallucinationLabels: Record<string, string> = {
   field_hallucination: '字段幻觉', rule_hallucination: '规则幻觉',
@@ -21,12 +24,15 @@ const hallucinationLabels: Record<string, string> = {
   duplicate: '重复',
 }
 
-onMounted(async () => {
+async function load() {
   loading.value = true
-  try { stats.value = await generationApi.statsOverview() }
+  try { stats.value = await generationApi.statsOverview(scope.value) }
   catch { ElMessage.error('加载失败') }
   finally { loading.value = false }
-})
+}
+
+onMounted(load)
+function switchScope() { load() }
 
 const hallucinationItems = computed(() => {
   return Object.entries(stats.value.hallucination_distribution).map(([key, count]) => ({ name: hallucinationLabels[key] || key, value: count }))
@@ -60,11 +66,27 @@ const reasoningShare = computed(() => {
   if (!u || u.total_tokens <= 0) return 0
   return Math.round((u.reasoning_tokens / u.total_tokens) * 100)
 })
+
+// 团队视图按模型条形，相对消耗最大的模型归一。
+const modelMax = computed(() => Math.max(1, ...(tokenUsage.value?.by_model || []).map(m => m.tokens)))
+function modelPercent(tokens: number) {
+  return Math.round((tokens / modelMax.value) * 100)
+}
 </script>
 
 <template>
   <div class="stats-view" v-loading="loading">
-    <h2 class="page-title">统计分析</h2>
+    <div class="stats-head">
+      <h2 class="page-title">统计分析</h2>
+      <el-radio-group v-model="scope" @change="switchScope">
+        <el-radio-button value="me">我的</el-radio-button>
+        <el-radio-button value="team">团队</el-radio-button>
+      </el-radio-group>
+    </div>
+    <el-alert
+      v-if="isTeam" type="info" :closable="false" class="scope-note"
+      title="团队视图汇总全员数据；个人批次明细仍只有本人可见。"
+    />
 
     <el-row :gutter="20" type="flex" class="stat-row">
       <el-col :span="6">
@@ -161,6 +183,45 @@ const reasoningShare = computed(() => {
       </el-col>
     </el-row>
 
+    <!-- 我的：系统兜底模型消耗提示 -->
+    <el-alert
+      v-if="tokenUsage && !isTeam" type="warning" :closable="false" class="scope-note"
+      :title="`其中 ${formatTokens(tokenUsage.system_tokens || 0)} tokens 走的是系统默认模型（平台额度），其余为你个人凭据的消耗。`"
+    />
+
+    <!-- 团队：按模型 / 按人拆分 -->
+    <template v-if="tokenUsage && isTeam">
+      <el-row :gutter="20" type="flex" style="margin-top:24px">
+        <el-col :span="12">
+          <el-card header="按模型消耗" shadow="never" class="mid-card">
+            <div v-if="!(tokenUsage.by_model || []).length" style="text-align:center;padding:32px;color:#909399">暂无数据</div>
+            <div v-for="m in (tokenUsage.by_model || [])" :key="m.model" class="hall-item">
+              <span class="model-name">{{ m.model }}</span>
+              <div class="hall-bar-wrap"><div class="hall-bar model-bar" :style="{width: modelPercent(m.tokens) + '%'}"></div></div>
+              <span class="stage-num">{{ formatTokens(m.tokens) }}</span>
+              <span class="stage-calls">{{ m.calls }} 次</span>
+            </div>
+          </el-card>
+        </el-col>
+        <el-col :span="12">
+          <el-card header="按成员消耗" shadow="never" class="mid-card">
+            <el-table :data="tokenUsage.by_user || []" size="small" border>
+              <el-table-column prop="username" label="成员" />
+              <el-table-column label="总 tokens" min-width="110">
+                <template #default="{ row }">{{ formatTokens(row.total_tokens) }}</template>
+              </el-table-column>
+              <el-table-column label="其中系统兜底" min-width="120">
+                <template #default="{ row }">
+                  <span :class="{ 'sys-warn': row.system_tokens > 0 }">{{ formatTokens(row.system_tokens || 0) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="case_count" label="用例数" width="80" />
+            </el-table>
+          </el-card>
+        </el-col>
+      </el-row>
+    </template>
+
     <el-row :gutter="20" type="flex" style="margin-top:32px">
       <el-col :span="8">
         <el-card shadow="never" class="feat-card"><template #header><span class="feat-title">知识库管理</span></template><p class="feat-desc">管理字段字典、业务规则、状态机和术语映射。支持 PRD 上传和缺陷 Excel 导入，构建项目级测试知识库。</p></el-card>
@@ -177,7 +238,12 @@ const reasoningShare = computed(() => {
 
 <style scoped>
 .stats-view { max-width: 1024px; margin: 0 auto; }
-.page-title { margin: 0 0 20px 0; font-size: 20px; }
+.stats-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.page-title { margin: 0; font-size: 20px; }
+.scope-note { margin-bottom: 20px; }
+.model-name { font-size: 13px; color: #606266; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+.model-bar { background: #67C23A; }
+.sys-warn { color: #E6A23C; font-weight: 600; }
 .stat-row { margin: 0; }
 .stat-card { background: #fff; border-radius: 8px; padding: 28px 20px; text-align: center; border: 1px solid #ebeef5; height: 110px; display: flex; flex-direction: column; justify-content: center; }
 .stat-num { font-size: 28px; font-weight: 700; color: #303133; }
