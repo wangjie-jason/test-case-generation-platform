@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from cryptography.fernet import Fernet
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 # 按 backend 目录定位 .env 文件
@@ -70,16 +72,29 @@ class Settings(BaseSettings):
 
     # ── 多用户与认证 ──
     # 首个管理员账号：库中无该用户时由启动流程自动创建（已存在绝不改密）。
-    ADMIN_USERNAME: str
-    ADMIN_PASSWORD: str
+    ADMIN_USERNAME: str = Field(min_length=1)
+    ADMIN_PASSWORD: str = Field(min_length=6)
     # JWT 签名密钥（HS256）。生成：python -c "import secrets;print(secrets.token_urlsafe(48))"
-    JWT_SECRET_KEY: str
+    # 强制 ≥32 字符：空串也能被 PyJWT 正常签发/校验（不报错），短密钥会显著削弱 HMAC
+    # 强度，故缺失或过短必须在启动期拦住，不能带着弱密钥对外发令牌。
+    JWT_SECRET_KEY: str = Field(min_length=32)
     # 个人 LLM api_key 的对称加密密钥（Fernet）。
     # 生成：python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
     LLM_CREDENTIAL_KEY: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 720  # 12 小时，一个工作日
 
     model_config = {"env_file": str(_ENV_PATH), "env_file_encoding": "utf-8"}
+
+    def model_post_init(self, __context) -> None:
+        # Fernet 密钥格式错误若懒到首次加解密才暴露，表现为生成/上传接口裸 500；
+        # 启动期试构造一次，不合法直接退出（fail-fast）。
+        try:
+            Fernet(self.LLM_CREDENTIAL_KEY.encode("utf-8"))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                "LLM_CREDENTIAL_KEY 不是合法的 Fernet 密钥，生成命令："
+                'python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"'
+            ) from exc
 
     @property
     def SYNC_DATABASE_URL(self) -> str:

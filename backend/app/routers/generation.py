@@ -20,6 +20,7 @@ from app.schemas.generation import (
 from app.models.user import User
 from app.routers.deps import get_current_user
 from app.services import access_service, llm_credential_service, usage_service
+from app.services.crypto_service import CryptoError
 from app.services.excel_service import ExcelExportService
 from app.services.pipeline_service import GeneratorService
 from app.services.llm_service import LLMServiceError
@@ -102,7 +103,9 @@ async def generate_clarify(
     """基于知识库补全需求：返回结构化的完整需求说明（Markdown），供用户确认/编辑后再生成用例。"""
     try:
         creds = await llm_credential_service.resolve_credentials(db, user.id)
-    except CredentialNotConfiguredError as exc:
+    except (CredentialNotConfiguredError, CryptoError) as exc:
+        # 未配置引导去设置页；密文解不开（换过 Fernet 密钥/密文损坏）同样引导重录，
+        # 不要让 decrypt 的 CryptoError 漏成无信息的 500。
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         # clarify 也要记账：它是一次完整的大 prompt 调用，不记的话看板上
@@ -130,7 +133,9 @@ async def generate_async(
     # 入口前置校验凭据：没配个人 key 也没有系统兜底时直接 400 引导，不建任务、不花钱。
     try:
         creds = await llm_credential_service.resolve_credentials(db, user.id)
-    except CredentialNotConfiguredError as exc:
+    except (CredentialNotConfiguredError, CryptoError) as exc:
+        # 未配置引导去设置页；密文解不开（换过 Fernet 密钥/密文损坏）同样引导重录，
+        # 不要让 decrypt 的 CryptoError 漏成无信息的 500。
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     # 自报的 kb_ids 收敛到可见集合，越界 400。
     kb_ids = await access_service.resolve_kb_ids(db, user, body.kb_ids or None)
@@ -367,9 +372,15 @@ async def parse_prd(
     content = await file.read()
     # 图片 OCR 走多模态模型：绑定当前用户凭据（个人优先、否则系统兜底）；都没配时
     # 不挡上传，图片识别降级为提示文案。
-    creds = await llm_credential_service.resolve_credentials_optional(db, user.id)
-    with llm_credentials.bind(creds):
-        text = await ParserService.parse(file.filename or "未命名", content)
+    try:
+        creds = await llm_credential_service.resolve_credentials_optional(db, user.id)
+    except CryptoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        with llm_credentials.bind(creds):
+            text = await ParserService.parse(file.filename or "未命名", content)
+    except Exception as exc:  # noqa: BLE001 扩展名合法但内容损坏（坏 docx/pdf），转 400 而非 500
+        raise HTTPException(status_code=400, detail="文件无法解析，请确认文件未损坏且格式正确") from exc
     return {"filename": file.filename, "format": ext, "text": text, "length": len(text)}
 
 

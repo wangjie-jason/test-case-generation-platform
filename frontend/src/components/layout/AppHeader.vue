@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router'
 import { Loading } from '@element-plus/icons-vue'
 import { useGenerationStore } from '@/stores/generation'
 import { useAuthStore } from '@/stores/auth'
+import { redirectToLogin } from '@/utils/authToken'
 
 const router = useRouter()
 const store = useGenerationStore()
@@ -22,7 +23,9 @@ function goWatch() {
 function onCommand(command: string) {
   if (command === 'logout') {
     auth.logout()
-    router.replace('/login')
+    // 整页跳转而非 SPA 内 replace：页面重载会销毁全部 Pinia store 单例并中止进行中的
+    // SSE fetch，避免共享电脑同标签页换号后残留上一用户的任务与生成内容。
+    redirectToLogin()
   } else if (command === 'settings') {
     router.push('/settings')
   }

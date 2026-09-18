@@ -51,7 +51,11 @@ class AdminCreateUserRequest(BaseModel):
     @field_validator("username")
     @classmethod
     def _strip(cls, v: str) -> str:
-        return v.strip()
+        # min_length 在校验前生效，纯空白（"   "）需要在 strip 后再判一次空。
+        v = v.strip()
+        if not v:
+            raise ValueError("用户名不能为空")
+        return v
 
     @field_validator("password")
     @classmethod
