@@ -189,8 +189,8 @@ onMounted(load)
 
 <style scoped>
 .settings-page {
-  padding: 20px;
   max-width: 720px;
+  margin: 0 auto;
 }
 .settings-card {
   margin-bottom: 20px;
