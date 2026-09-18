@@ -149,8 +149,11 @@ async def probe_credentials(creds: LLMCredentials) -> dict:
     if resp.status_code in (401, 403):
         return {"ok": False, "latency_ms": latency, "message": "API Key 无效或无权限（401/403）"}
     if resp.status_code == 404:
+        # 火山方舟等服务商在模型名/接入点 ID 不存在时同样返回 404，两种可能并列；
+        # suffix 是上游 error.message，原样附上帮用户直接定位。
         return {"ok": False, "latency_ms": latency,
-                "message": "接口地址 404，请检查 base_url 是否指向 /chat/completions 的基址（通常以 /v1 结尾）"}
+                "message": f"404：base_url 基址不对（通常以 /v1 或 /v3 结尾、勿带 /chat/completions），"
+                           f"或模型名/接入点 ID 不存在{suffix}"}
     if resp.status_code == 400:
         return {"ok": False, "latency_ms": latency, "message": f"请求被拒（400），模型名可能有误{suffix}"}
     if resp.status_code == 429:
