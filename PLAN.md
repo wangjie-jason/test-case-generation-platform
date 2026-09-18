@@ -1,15 +1,17 @@
 # Test Case Generation Platform — 实施计划
 
-> 版本 v2.6 | 更新 2026-08-18 | 死代码清理（删 `POST /retrieve`、`GET /cases` 无 `batch_id` 分支、前端 4 个无引用文件与未用的 echarts 依赖、`complete` 事件里没人消费的 `validation_warnings`、`excel_service` 三个未接路由的导入函数、孤儿 schema `KnowledgeBaseUpdate`）+ `generate_stream` 拆分（238 行 → 64 行编排器，模块并行改用通用 `_parallel_agents`，事件契约零变化）+ 修生成失败的**原因到不了用户**（`_generate_one_batch` 提前滤掉了 error 占位，使 `generate_stream` 里取原因那段成了死代码；现在「只吐思考」「模型判定无可测功能点」都会把可行动原因透传到前端）+ 回归测试 61 → 108 项（新增 LLM 输出解析 36 + 生成流水线事件序列 11）
+> 版本 v2.7 | 更新 2026-09-18 | 多用户化与服务器部署收口：登录/JWT(12h)/用户管理（建号·角色·停用·重置密码，只停用不删除）、个人大模型凭据（Fernet 加密、连通测试、清除）+ 系统兜底模型两级解析（个人 key 失败不自动降级）、ContextVar+任务快照把凭据透传到后台流水线、知识库个人/团队可见性与 can_manage、批次/用例/SSE/few-shot 按 owner 私有、统计「我的/团队」两视图（by_model/by_user，无批次明细）、Alembic 0003 迁移（users 两表+归属列+partial unique index+老数据归 admin）、compose 端口收敛与 healthcheck、网关 TLS/SSE 反代示例、SQLite WAL、env_file 密钥注入与在线备份。对应 PR #70–#73/#76/#77，设计见 DESIGN.md v0.32
 >
-> 版本 v2.5 | 更新 2026-08-14 | 评审分组改为条数驱动（不写死深度，单平台需求下不再炸成 178 组）+ 评审判定不再静默丢失（截断检测 + 抢救已闭合判定 + 只列待删）+ Token 用量统计（今日/本周/累计 + 阶段拆分 + 批次级）+ CI（GitHub Actions）+ 回归测试 61 项 + 排序对原有用例零改动（路径层也受 is_movable 约束）+ 生成时自动排序（补充用例归位）+ prompt 标题下钻到功能点 + 补充用例可标识 + 导出可选范围 + 评审/补充按模块并行 + agent 卡片流式 + 生成耗时可视化 + 模块并行生成 + 需求补全 + 多人隔离 + 飞书 PRD 导入
+> 版本 v2.6 | 更新 2026-08-18 | 死代码清理（删 `POST /retrieve`、`GET /cases` 无 `batch_id` 分支、前端 4 个无引用文件与未用的 echarts 依赖、`complete` 事件里没人消费的 `validation_warnings`、`excel_service` 三个未接路由的导入函数、孤儿 schema `KnowledgeBaseUpdate`）+ `generate_stream` 拆分（238 行 → 64 行编排器，模块并行改用通用 `_parallel_agents`，事件契约零变化）+ 修生成失败的**原因到不了用户**（`_generate_one_batch` 提前滤掉了 error 占位，使 `generate_stream` 里取原因那段成了死代码；现在「只吐思考」「模型判定无可测功能点」都会把可行动原因透传到前端）+ 回归测试 61 → 108 项（新增 LLM 输出解析 36 + 生成流水线事件序列 11）
 
 ## 当前状态
 - **架构变更**: Project/Module → KnowledgeBase（知识库为核心，卡片式管理）
-- **导航**: 统计看板 / 用例生成 / 审核标注 / 知识库
+- **导航**: 统计看板(首页) / 用例生成 / 审核标注 / 知识库 / 设置 / 用户管理(仅管理员)；独立登录页
+- **多用户**: 登录后使用（JWT 12h）；知识库分团队/个人，批次与统计按人隔离；个人大模型凭据 + 系统兜底两级
 - **Prompt**: 融合六大测试技术（等价类/边界值/决策表/状态迁移/错误推测/组合测试）+ 覆盖率总结
 - **用例格式**: 对齐用户模板（标题【模块-功能】、等级P0-P2、步骤字符串）
 - **PRD 导入**: 支持本地文件上传（PDF/Word/MD/TXT） + 飞书链接一键导入（Wiki/docx/旧 doc，含表格结构化）
+- **部署**: Docker Compose（后端不直暴端口、前端绑回环）+ 公司网关 TLS 反代，SQLite WAL，详见 README
 
 ## 已完成功能清单
 | 模块           | 功能                                                                                       | 状态 |
@@ -24,7 +26,11 @@
 | 评审-删除-补充 | 生成后 LLM 以测试专家身份判定哪些该删（只列待删，未列出即保留），定向补充缺口，不再整批改写。评审按标题【】模块路径分组并行：顶层一律先分，之后**由条数驱动**——只有超 `LLM_REVIEW_BATCH_SIZE` 的组才逐级下钻，装得下的整组保留（不写死深度：路径有几级取决于 PRD 是否含平台层）；响应撞满 max_tokens 时检测截断并抢救已判完的部分，前端小结标注「仅部分判定生效」 | ✓    |
 | 并行生成       | store 改为多任务 Map，可同时发起多个生成互不阻塞；前端任务列表可切换查看                   | ✓    |
 | 模块并行+分区流式 | 大需求按模块并发生成（并发上限+错峰防限流），模块内真流式，前端按 agent 卡片分区展示各自的流（可多开，完成后换用例列表）；评审/补充也按模块并发 + agent 卡片流式（实时看到保留/删除判断与补充过程） | ✓    |
-| 多人隔离       | localStorage 匿名 client_id，后端 owner_id 过滤 active 任务，不同浏览器互不干扰            | ✓    |
+| 登录与账号     | 用户名/密码登录，bcrypt 哈希 + HS256 JWT（12h）；除登录与 /api/health 外全接口鉴权；401 自动跳登录；管理员建号/角色/停用/重置密码（只停用不删除，不能操作自己、至少留一个活跃管理员） | ✓    |
+| 个人LLM凭据    | 「设置」页配置 OpenAI 兼容三件套，api_key Fernet 加密存储、只回掩码；支持连通测试与清除。**两级解析**：个人凭据优先，否则系统兜底模型，皆无则引导配置；个人 key 失败不自动降级 | ✓    |
+| 数据归属       | 知识库分团队（全员可见可引用、创建者/管理员可改删）与个人（仅本人，管理员也不可见）；批次/用例/评审/活动任务/SSE 全部按 owner 私有（越权 task_id 返 404）；历史 few-shot 向量按 owner 过滤；删库显式级联（6 张子表 + 2 个 Chroma 集合 + 用例置 kb_id=NULL） | ✓    |
+| 统计两视图     | 「我的/团队」切换：我的按 owner 全量指标并拆系统兜底消耗；团队给全员汇总 + 按模型/按成员消耗，不含他人批次明细 | ✓    |
+| 部署收口       | compose 后端仅 expose、前端绑 127.0.0.1:3000，env_file 注入密钥，.dockerignore 防 .env/data 入镜像，restart+双向 healthcheck；网关 TLS 反代 SSE 示例（deploy/）；SQLite WAL；在线备份与密钥分离 | ✓    |
 | 需求补全       | POST /generate/clarify，LLM 结合知识库补全简略需求为结构化 Markdown，可编辑确认            | ✓    |
 | 429 处理       | 限额/限流不重试直接报错，5xx 服务端抖动保留指数退避重试                                    | ✓    |
 | 死代码清理     | 删除无人调用的 POST /generate、/generate/stream、GenerateResponse 及相关非流式函数         | ✓    |
@@ -56,46 +62,52 @@
 | Embedding | Embedding API (OpenAI 兼容) (可切换 sentence-transformers 本地模式)                       |
 | PRD解析   | pdfplumber + python-docx                                                                  |
 | Excel处理 | openpyxl                                                                                  |
-| 部署      | Docker + docker-compose                                                                   |
+| 认证/加密 | PyJWT（HS256, 12h）+ bcrypt（cost 12）+ cryptography（Fernet 加密个人 API Key）           |
+| 部署      | Docker Compose + 公司网关 TLS 反代（后端不直暴端口、SQLite WAL、在线备份）                 |
 
 ---
 
 ## 项目结构
 
 ```
-/Users/wangjie/Desktop/test-case-generation-platform/
+<repo-root>/
 ├── docker-compose.yml
-├── .env.example
-├── DESIGN.md              # (已有)
+├── deploy/                  # 网关反代示例：nginx-gateway.example.conf（TLS + SSE 长连接参数）
+├── DESIGN.md
+├── PLAN.md
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
+│   ├── .env.example         # 运行时配置模板（复制为 .env；compose 经 env_file 注入，不进镜像）
+│   ├── alembic/             # 迁移：0001 初始 / 0002 老库补列 / 0003 多用户（users 两表+归属+回填）
 │   ├── scripts/             # 运维脚本（手工执行）：delete_batch / backfill_case_priority / reindex_vectors / resort_batch / clean_expected_step_no
 │   └── app/
-│       ├── main.py
-│       ├── config.py
-│       ├── database.py
-│       ├── models/          # 10 SQLAlchemy models (UUID pk)
-│       ├── schemas/         # Pydantic request/response
-│       ├── routers/         # FastAPI route handlers（generation / knowledge 两个）
-│       ├── services/        # 12 service modules
-│       ├── vectorstore/     # ChromaDB client
-│       └── utils/           # 纯逻辑（不依赖 sqlalchemy/chromadb）：
-│                            #   case_grouping / case_ordering / llm_parsing / token_usage / text_utils / docx_blocks
+│       ├── main.py          # lifespan：run_migrations + ensure_admin；router 挂载与登录依赖
+│       ├── config.py        # Settings（ADMIN/JWT/Fernet 四项必填，缺失启动失败）
+│       ├── database.py      # 异步 engine；SQLite WAL/synchronous=NORMAL/busy_timeout；run_migrations
+│       ├── models/          # 11 个模型文件 / 12 张表（含 user.py: User, UserLlmConfig）
+│       ├── schemas/         # Pydantic request/response（含 user.py / llm_config.py）
+│       ├── routers/         # auth / admin_users / llm_config / generation / knowledge（+ deps.py 鉴权依赖）
+│       ├── services/        # 21 个：auth/crypto/access/llm_credential + 知识库/生成流水线/检索/解析…
+│       ├── vectorstore/     # ChromaDB client（search 支持 where_extra；delete_by_kb/source）
+│       └── utils/           # 纯逻辑：case_grouping / case_ordering / llm_parsing /
+│                            #   token_usage / llm_credentials（ContextVar）/ text_utils / docx_blocks
 ├── frontend/
 │   ├── Dockerfile
-│   ├── nginx.conf
+│   ├── nginx.conf           # /api 反代 backend；SSE 参数（HTTP/1.1、清 Connection、3600s、关缓冲）
 │   ├── vite.config.ts
 │   └── src/
 │       ├── main.ts
 │       ├── App.vue
-│       ├── router/          # Vue Router 4
-│       ├── stores/          # 2 Pinia stores (generation / knowledge)
-│       ├── api/             # 3 Axios modules (client / generation / knowledge)
-│       ├── types/           # TypeScript interfaces
-│       ├── views/           # 5 page views (Generation / Review / Stats / Knowledge / NotFound)
-│       ├── components/      # layout/ knowledge/ （生成与审核页未拆子组件，见 Phase 3/4 注）
-│       └── utils/           # clientId / formatTokens / priority / saveBlob
+│       ├── router/          # 路由守卫：无 token 跳 /login、requiresAdmin、/stats→/ 重定向
+│       ├── stores/          # 3 Pinia stores (auth / generation / knowledge)
+│       ├── api/             # 6 个：client(401拦截) / auth / admin / llmConfig / generation / knowledge
+│       ├── types/           # auth / llmConfig / project / knowledge / testCase
+│       ├── views/           # 8 个：Login / Stats(首页) / Generation / Review / Knowledge /
+│       │                    #       Settings(凭据+改密) / Users(管理员) / NotFound
+│       ├── components/      # layout/ knowledge/(含共享只读) generation/ review/
+│       ├── composables/     # useBatchList / useBatchReview / useDurationTimer 等 6 个
+│       └── utils/           # authToken(tcg_token) / formatTokens / priority / renderSteps / saveBlob
 ```
 
 ---
@@ -104,10 +116,31 @@
 
 所有接口前缀 `/api/v1`。前端通过 Axios client 统一处理响应和错误；FastAPI 当前直接返回业务对象。
 
+**鉴权（v0.32）**：除 `POST /auth/login` 以及 `/api/v1` 前缀之外的 `GET /api/health`，全部接口要求 `Authorization: Bearer <JWT>`（登录后 12h 有效）；未登录/过期/停用返 401，前端拦截后整页跳 `/login?redirect=...`。SSE 用原生 fetch，需手动补同一个头。无 CORS（前后端同源）。
+
 ### 当前已实现 API
+
+#### 认证与账号
+- `POST /auth/login` — 用户名/密码换 token；成功返 `{access_token, token_type:"bearer", user}`；用户不存在与密码错统一 401，已停用账号返 403
+- `GET /auth/me` — 当前用户 `{id, username, display_name, is_admin, is_active, created_at}`
+- `POST /auth/change-password` — 旧密码校验 + 新密码（≥6 位）
+- `GET /admin/users` / `POST /admin/users` — 管理员列用户 / 建号（用户名、显示名、初始密码、is_admin）；重名 400
+- `PATCH /admin/users/{id}` — 改显示名/角色/停用（仅这三字段可选）；不能停用或降级自己、至少保留一个活跃 admin，违反返 400
+- `POST /admin/users/{id}/reset-password` — 管理员重置密码
+- （无删除用户接口；账号生命周期只有启用/停用）
+
+#### 个人大模型凭据
+- `GET /llm-config` — `{configured, base_url, model, api_key_masked, updated_at, fallback_available, fallback_model}`，不回传明文/密文
+- `PUT /llm-config` — upsert 三件套；api_key 传空=不改（首次必填），base_url 末尾 `/` 归一
+- `DELETE /llm-config` — 清除个人配置，之后回落到系统兜底模型
+- `POST /llm-config/test` — 连通测试：body 带表单值则按表单（缺项回落已存值），空 body 测当前生效配置；max_tokens=8、20s 超时，返 `{ok, latency_ms, message}`
+- 解析规则：个人凭据 → 系统兜底（`LLM_API_KEY/BASE_URL/MODEL`）→ 皆无时 clarify/async 入口 400 不建任务；个人 key 调用失败不自动降级
 
 #### 知识库
 - `GET/POST /knowledge-bases`, `PUT /knowledge-bases/{kb_id}`, `DELETE /knowledge-bases/{kb_id}`
+  - 创建/更新可带 `visibility: team|personal`（默认 team）；列表只含团队库 + 本人个人库，响应带 `owner_id/visibility/owner_name/can_manage`
+  - 团队库全员可读可引用，改/删限创建者与管理员（403）；不可见 id 读返 404、在 kb_ids 入参里越界返 400；重名按 partial unique 约束返 400
+  - 删除做显式级联（SQLite 未开 FK）：6 张子表 + prd/defect 两向量集合按 kb 清，关联 test_cases 置 kb_id=NULL
 - `GET/POST /knowledge-bases/{kb_id}/field-dicts`, `PUT/DELETE /knowledge-bases/{kb_id}/field-dicts/{item_id}`
 - `GET/POST /knowledge-bases/{kb_id}/business-rules`, `PUT/DELETE /knowledge-bases/{kb_id}/business-rules/{item_id}`
 - `GET/POST /knowledge-bases/{kb_id}/state-machines`, `PUT/DELETE /knowledge-bases/{kb_id}/state-machines/{item_id}`
@@ -120,20 +153,20 @@
 > （曾有 `POST /retrieve`，前端从未调用，已移除。）
 
 #### 生成
-- `POST /parse-prd` — 上传解析 PRD 文件
-- `POST /generate/clarify` — 基于知识库补全需求，返回结构化完整需求（Markdown），供用户确认/编辑后再生成
-- `POST /generate/async` — 启动后台生成任务，立即返回 `{task_id, title, status, owner_id, created_at}`；任务脱离请求运行，刷新/切走后仍继续。请求体 `client_id` 作为归属者，实现多人/多浏览器隔离
-- `GET /generate/active?client_id=` — 列出本客户端仍在运行的生成任务，供刷新后「继续查看」
-- `GET /generate/stream/{task_id}` — 订阅指定任务的 SSE：先重放已缓存事件，再推送实时事件（支持断线重连续看）
+- `POST /parse-prd` — 上传解析 PRD 文件（图片 OCR 随当前用户凭据，无凭据时插入占位说明、不挡上传）
+- `POST /generate/clarify` — 基于知识库补全需求，返回结构化完整需求（Markdown），供用户确认/编辑后再生成；个人和兜底凭据皆无返 400
+- `POST /generate/async` — 启动后台生成任务，立即返回 `{task_id, title, status, owner_id, created_at}`；任务脱离请求运行，刷新/切走后仍继续。owner 取登录用户、凭据在请求期解析后快照进任务（旧 `client_id` 已移除）
+- `GET /generate/active` — 无参，固定列出当前用户仍在运行的任务，供刷新后「继续查看」
+- `GET /generate/stream/{task_id}` — 订阅指定任务的 SSE：先重放已缓存事件，再推送实时事件（支持断线重连续看）；task 不属于本人返 404
 
 #### 审核
-- `GET /cases/batches` — 所有批次的汇总：`[{batch_id, total, reviewed, approved, req_text, created_at, tokens}]`。历史/审核页首屏用它渲染折叠卡片，避免一次拉全量被截断。`tokens` 为该批 LLM 消耗，用量统计上线前的批次为 `null`（前端不显示）。
-- `GET /cases?batch_id=<uuid>` — 某个批次的全部用例（无上限）。`batch_id` 必填：前端一律先调 `/cases/batches` 拿汇总，再对展开的那一批拉明细。（早先允许不传、返回最近若干条概览，已无调用方，该分支已移除。）
-- `POST /cases/{id}/review` — 单条审核
+- `GET /cases/batches` — **当前用户**的批次汇总：`[{batch_id, total, reviewed, approved, req_text, created_at, tokens}]`。历史/审核页首屏用它渲染折叠卡片，避免一次拉全量被截断。`tokens` 为该批 LLM 消耗，无流水的批次为 `null`（前端不显示）。
+- `GET /cases?batch_id=<uuid>` — 某个批次的全部用例（无上限）。`batch_id` 必填且必须属于本人（否则 404）：前端一律先调 `/cases/batches` 拿汇总，再对展开的那一批拉明细。
+- `PATCH /cases/{id}` / `POST /cases/{id}/review` / 批次内手工新增与插入 — 全部先校用例/批次归属，非本人 404
 
 #### 导出 & 统计
 - `POST /cases/export` — 请求体为 `{ cases: [...] }`
-- `GET /stats/overview` — 看板数据。除用例数/可用率/幻觉分布外带 `token_usage`：`{today_tokens, week_tokens, total_tokens, reasoning_tokens, calls, by_stage: [{stage, label, tokens, calls}], since}`。时间口径为 naive Asia/Shanghai（本周 = 周一 00:00 起）；`since` 是首条流水时间，为 `null` 说明还没采到数据，前端据此提示统计起点，避免把「累计 0」误读成「一次都没生成过」。
+- `GET /stats/overview?scope=me|team` — 看板数据，默认 me（非 team 值一律按 me）。两 scope 同键：用例数/可用率/幻觉分布/generation_count + `token_usage`。me 全部按 owner 过滤，token 含 `{today_tokens, week_tokens, total_tokens, reasoning_tokens, system_tokens, calls, by_stage:[{stage,label,tokens,calls}], since}`（`system_tokens` = 其中走系统兜底的消耗）；team 为全员聚合，并追加 `by_model:[{model,tokens,calls}]` 与 `by_user:[{username,total_tokens,system_tokens,case_count}]`（仅有流水的用户入表），**不提供他人批次明细**。时间口径为 naive Asia/Shanghai（本周 = 周一 00:00 起）；`since` 是首条流水时间，为 `null` 说明还没采到数据。
 
 ### 计划 API
 - 批量审核：`POST /cases/batch-review`
@@ -265,6 +298,7 @@ event: error     → {message: "..."}
 5. **Embedding先用云端 API**: 免本地模型下载，config支持切 sentence-transformers 本地模式
 6. **Element Plus按需导入**: `unplugin-vue-components` + `unplugin-auto-import` 控制打包体积
 7. **生成解耦后台任务**: 生成用 `asyncio.create_task` + 独立 DB 会话脱离请求，事件缓存在内存任务注册表中支持重连重放；前端状态提升到 Pinia store。代价是任务态为进程内内存，后端重启会丢失活动任务列表（已落库用例不受影响）
+8. **多用户 fail-closed（v0.32）**: owner 用无 FK 裸列、查询一律 `WHERE owner_id=:me`，NULL 天然不可见；越权读统一 404 不泄露存在性；权限服务端判定，前端只读化只是体验。个人 key 调用失败**不自动降级**系统兜底（避免悄悄花公司额度）；个人 api_key 用 Fernet 加密、接口只回掩码，JWT/Fernet 密钥与备份分开存放
 
 ## 风险应对
 
