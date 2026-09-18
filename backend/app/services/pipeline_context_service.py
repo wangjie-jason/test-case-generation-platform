@@ -2,30 +2,22 @@
 
 集中放**多个** stage 模块都会用到的小工具：
 - _Context：阶段间共享的检索结果与 prompt 上下文 dataclass
-- _build_context：跑一次检索 + 历史用例 + 基础 system prompt
-- _prompt_kwargs：把检索结果摊平给 PromptService 的入参
-- _knowledge_matches / _pick / _clip_value / _clip_text：推给前端的命中知识脱敏
-- _get_historical_cases：历史用例的少量检索
-- _has_valid_cases：是否有至少一条有效用例
-- _title_key / _dedup_by_title：title 归一化与跨批去重
+- _prompt_kwargs：把检索结果摊平给 PromptService 的入参（clarify 与生成 stage 共用）
+- _has_valid_cases：是否有至少一条有效用例（编排器与评审 stage 共用）
+- _title_key：title 归一化（生成/补充 stage 的去重共用）
 - _parallel_agents：通用「多 agent 并行 + 单点汇流」运行器（生成/评审/补充共用）
 
-判据是「≥2 个 stage 复用」：只服务单一阶段的东西一律放回该阶段自己的模块，
-免得这里退化成 utils 垃圾桶——评审 prompt（_review_prompt / _case_brief）因此已挪回
+判据是「≥2 个 stage 复用」：只服务编排器的 _build_context/_get_historical_cases 与命中
+知识脱敏助手放在 pipeline_service，单阶段专用的 _dedup_by_title 在 pipeline_generate_service，
+免得这里退化成 utils 垃圾桶——评审 prompt（_review_prompt / _case_brief）此前也据此挪回
 pipeline_review_service，与 pipeline_supplement_service 自带 _supplement_prompt 的摆法对齐。
 """
 import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
-
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.services import pipeline_deps as deps
-from app.services.prompt_service import PromptService
-from app.vectorstore.chroma_client import ChromaStore
 
 logger = logging.getLogger(__name__)
 
@@ -60,92 +52,6 @@ def _prompt_kwargs(requirement_text: str, retrieval: dict, historical_cases: lis
     }
 
 
-async def _build_context(db: AsyncSession, requirement_text: str,
-                         kb_ids: list[str] | None, owner_id: str | None) -> _Context:
-    """检索知识库 + 历史用例，顺带算好推给前端的命中统计与明细。
-
-    kb_ids 已在路由层收敛为该用户可见的库；owner_id 用于历史用例 few-shot 按人隔离。
-    """
-    retrieval = await deps.RetrievalService.retrieve(db, requirement_text, kb_ids=kb_ids)
-    historical_cases = await _get_historical_cases(requirement_text, retrieval["query_keywords"], owner_id)
-    base_system, _ = PromptService.build(**_prompt_kwargs(requirement_text, retrieval, historical_cases))
-    return _Context(
-        requirement_text=requirement_text,
-        retrieval=retrieval,
-        historical_cases=historical_cases,
-        knowledge_used={
-            "field_dicts_count": len(retrieval["field_dicts"]),
-            "business_rules_count": len(retrieval["business_rules"]),
-            "state_machines_count": len(retrieval["state_machines"]),
-            "term_mappings_count": len(retrieval["term_mappings"]),
-            "prd_chunks_count": len(retrieval.get("prd_chunks", [])),
-            "defect_chunks_count": len(retrieval.get("defect_chunks", [])),
-            "historical_cases_count": len(historical_cases),
-        },
-        knowledge_matches=_knowledge_matches(retrieval, historical_cases),
-        base_system=base_system,
-    )
-
-
-def _knowledge_matches(retrieval: dict, historical_cases: list[dict]) -> dict[str, list[dict]]:
-    return {
-        "field_dicts": [_pick(item, ["id", "field_name", "display_name", "data_type", "description"]) for item in retrieval["field_dicts"]],
-        "business_rules": [_pick(item, ["id", "rule_name", "rule_type", "expression", "description"]) for item in retrieval["business_rules"]],
-        "state_machines": [_pick(item, ["id", "entity", "from_state", "to_state", "condition"]) for item in retrieval["state_machines"]],
-        "term_mappings": [_pick(item, ["id", "ui_term", "tech_field", "mapping_desc"]) for item in retrieval["term_mappings"]],
-        "prd_chunks": [_clip_text(item) for item in retrieval.get("prd_chunks", [])],
-        "defect_chunks": [_clip_text(item) for item in retrieval.get("defect_chunks", [])],
-        "historical_cases": [_clip_text(item) for item in historical_cases],
-    }
-
-
-def _pick(item: dict, fields: list[str]) -> dict:
-    result = {}
-    for field in fields:
-        value = item.get(field)
-        if value is not None:
-            result[field] = _clip_value(value)
-    return result
-
-
-def _clip_value(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    return value[:160]
-
-
-def _clip_text(item: dict) -> dict:
-    clipped = _pick(item, ["id", "title", "filename", "score", "distance"])
-    text = str(item.get("text") or "")
-    if text:
-        clipped["text"] = text[:160]
-    return clipped
-
-
-async def _get_historical_cases(text: str, keywords: list[str], owner_id: str | None) -> list[dict]:
-    if not keywords or not owner_id:
-        return []
-    try:
-        c = ChromaStore()
-        # 只命中本人历史用例：kb_ids 对该集合无意义（生成用例不绑库、kb_id 为空），
-        # 隔离靠 metadata.owner_id。存量旧向量没有该 key，会被 where 过滤（reindex 后恢复）。
-        results = [r for r in await asyncio.to_thread(
-            c.search, "historical_cases", text, 3, None, {"owner_id": owner_id}
-        ) if r.get("text")]
-        if not results:
-            return []
-        # 与 _vector_chunks 一致的距离阈值过滤：最近的示例都太远说明与需求无关，
-        # 否则历史用例会作为 few-shot 把模型带偏（这正是无关需求被"带跑"的根因）。
-        min_d = min(r.get("distance", float("inf")) for r in results)
-        if min_d > settings.VECTOR_MIN_DISTANCE_THRESHOLD:
-            return []
-        max_allowed = min_d + settings.VECTOR_DISTANCE_DELTA
-        return [{"text": r["text"], "score": r.get("distance", 0)} for r in results if r.get("distance", float("inf")) <= max_allowed]
-    except Exception:
-        logger.exception("历史用例检索失败，跳过 few-shot 示例")
-        return []
-
-
 def _has_valid_cases(cases: list[dict]) -> bool:
     return any(case.get("title") and not case.get("error") for case in cases)
 
@@ -157,22 +63,6 @@ def _title_key(title: str) -> str:
     # 全角空格/标点常见变体归一（只处理空白，避免误伤业务语义）
     t = title.replace("\u3000", " ").strip()
     return " ".join(t.split())
-
-
-def _dedup_by_title(cases: list[dict]) -> list[dict]:
-    """按归一化 title 精确去重，保留首次出现的用例（保序）。"""
-    seen: set[str] = set()
-    result: list[dict] = []
-    for c in cases:
-        key = _title_key(c.get("title", ""))
-        if not key:
-            result.append(c)  # 无 title 的（如 error 占位）不参与去重，原样保留
-            continue
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(c)
-    return result
 
 
 async def _parallel_agents(items: list[dict], worker_factory, phase: str):

@@ -12,7 +12,6 @@ from app.services import pipeline_deps as deps
 from app.services.prompt_service import PromptService
 from app.services.pipeline_context_service import (
     _Context,
-    _dedup_by_title,
     _parallel_agents,
     _prompt_kwargs,
     _title_key,
@@ -91,6 +90,22 @@ async def _stage_generate(ctx: _Context) -> AsyncGenerator[dict, None]:
             logger.info("去重合并：%d → %d 条", len(all_cases), len(deduped))
         all_cases = deduped
     yield {"type": "_results", "results": all_cases}
+
+
+def _dedup_by_title(cases: list[dict]) -> list[dict]:
+    """按归一化 title 精确去重，保留首次出现的用例（保序）。"""
+    seen: set[str] = set()
+    result: list[dict] = []
+    for c in cases:
+        key = _title_key(c.get("title", ""))
+        if not key:
+            result.append(c)  # 无 title 的（如 error 占位）不参与去重，原样保留
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(c)
+    return result
 
 
 async def _generate_by_modules(ctx: _Context, modules: list[str]) -> AsyncGenerator[dict, None]:
