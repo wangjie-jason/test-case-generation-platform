@@ -147,10 +147,10 @@ function backToList() {
         <el-form-item label="名称" required><el-input v-model="formName" placeholder="如 实时视频监控" /></el-form-item>
         <el-form-item label="可见性">
           <el-radio-group v-model="formVisibility">
-            <el-radio value="team">
+            <el-radio value="team" class="visibility-radio">
               团队：所有人可查看和引用，仅创建者/管理员可修改删除
             </el-radio>
-            <el-radio value="personal">
+            <el-radio value="personal" class="visibility-radio">
               个人：仅你自己可见和使用
             </el-radio>
           </el-radio-group>
@@ -177,4 +177,8 @@ function backToList() {
 .kb-detail-header { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 16px; }
 .kb-back-button { padding: 0; }
 .kb-detail-title { margin: 0; font-size: 24px; font-weight: 600; color: #303133; }
+.visibility-radio { display: flex; align-items: flex-start; height: auto; margin: 0 0 8px; white-space: normal; }
+.visibility-radio:last-child { margin-bottom: 0; }
+.visibility-radio :deep(.el-radio__input) { margin-top: 4px; }
+.visibility-radio :deep(.el-radio__label) { white-space: normal; line-height: 22px; }
 </style>
