@@ -86,16 +86,41 @@ ipconfig getifaddr en0
 - 内网 IP 由 DHCP 分配，换网络或重连后可能变化，变了要重新告知同事。
 - **需要登录**：除健康检查和登录接口外，所有接口都要求登录，未登录会自动跳到登录页。账号由管理员创建，首个管理员通过 `.env` 的 `ADMIN_USERNAME`/`ADMIN_PASSWORD` 在启动时初始化。
 
-### Docker 部署
+### Docker 部署到服务器
 
 ```bash
-# 首次：准备运行时配置（含 LLM key、飞书凭据等），按注释填入真实值
+# 1) 准备运行时配置（含必填密钥，见下）
 cp backend/.env.example backend/.env
+vi backend/.env
 
+# 2) 构建并后台启动
 docker compose up -d --build
 ```
 
-`backend/.env` 只在运行时通过 compose 的 `env_file` 注入容器；`backend/.dockerignore` 保证它和 `data/` 数据库不会被打进镜像层。
+- 前端容器只绑定 `127.0.0.1:3000`，后端不直接暴露端口；对外统一由公司网关终止 TLS 后反代到 3000。配置示例见 [`deploy/nginx-gateway.example.conf`](deploy/nginx-gateway.example.conf)（含 SSE 长连接参数）。
+- 首次启动自动建表迁移并创建首个管理员。
+
+**`backend/.env` 必填项**（`.env.example` 有注释与生成命令）：
+
+| 变量 | 说明 |
+| --- | --- |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 首个管理员，仅在库中不存在时创建（之后改密走界面） |
+| `JWT_SECRET_KEY` | 登录 token 签名密钥 |
+| `LLM_CREDENTIAL_KEY` | 用户个人 API Key 的加密密钥（Fernet） |
+| `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` | **系统兜底模型**：未配置个人凭据的用户走这里；留空则所有人必须自配 |
+| `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 飞书导入（不用可留空） |
+
+> 多用户模型：知识库分**团队**（全员可见引用，改删限创建者/管理员）和**个人**（仅本人）；批次与统计按人隔离，统计页可切「团队」看全员汇总。
+
+**数据备份**：只需备份 SQLite 库与 chroma 目录（都在挂载卷 `./data`）。SQLite 已开 WAL，用在线备份而非直接 cp：
+
+```bash
+# 每日 cron，保留 14 天
+sqlite3 ./data/testcase_platform.db ".backup '/backup/tcg-$(date +%F).db'"
+tar czf /backup/chroma-$(date +%F).tgz -C ./data chromadb
+```
+
+备份文件含用户 API Key 的密文，按敏感件保管；`JWT_SECRET_KEY` 与 `LLM_CREDENTIAL_KEY` 要与备份分开存放（丢了 Fernet 密钥，用户需重录 key）。
 
 ## 功能模块
 

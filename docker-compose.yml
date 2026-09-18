@@ -1,23 +1,41 @@
 services:
   backend:
     build: ./backend
-    ports:
-      - "8000:8000"
-    # 运行时配置（含兜底模型 key、飞书凭据、后续的首管理员/JWT/Fernet 密钥）统一从
-    # backend/.env 注入；该文件被 .dockerignore 排除、不进镜像。新部署从 .env.example 复制。
+    # 不直接对外暴露端口：只在 compose 网络内供前端 nginx 反代访问。
+    # 对外统一由前端容器（127.0.0.1:3000）+ 公司网关 TLS 终止接入。
+    expose:
+      - "8000"
+    # 运行时配置（兜底模型 key、飞书、首管理员、JWT/Fernet 密钥）统一从
+    # backend/.env 注入；该文件被 .dockerignore 排除、不进镜像。
     env_file:
       - ./backend/.env
     environment:
-      # 仅容器内路径覆盖，优先级高于 env_file，确保库文件落在挂载卷里。
+      # 仅容器内路径覆盖（优先级高于 env_file），确保库文件落在挂载卷里。
       - DATABASE_URL=sqlite+aiosqlite:///app/data/testcase_platform.db
       - CHROMA_PERSIST_DIR=/app/data/chromadb
+      - UPLOAD_DIR=/app/uploads
     volumes:
       - ./data:/app/data
       - ./backend/uploads:/app/uploads
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
 
   frontend:
     build: ./frontend
+    # 只绑本机回环：由本机上的公司 nginx/网关终止 TLS 后反代到这里，不对内网直暴。
     ports:
-      - "3000:80"
+      - "127.0.0.1:3000:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
