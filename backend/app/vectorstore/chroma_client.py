@@ -141,6 +141,12 @@ class ChromaStore:
         kb_ids 转成 kb_id 的 $in 过滤；where_extra 是额外的等值条件（如
         {"owner_id": uid}），多个条件用 $and 合并。
         """
+        # 空列表 = 显式限定到零个知识库，必须零结果（fail-closed）：不能把空 $in
+        # 发给 Chroma（行为不可靠），更不能退化为 where=None 跨全部个人库检索。
+        # 放在最前面，连 embedding 模型与客户端都不必初始化。
+        if kb_ids is not None and not kb_ids:
+            return []
+
         embed_fn = self._get_embedding_fn()
         if not self._model_ready:
             self._model_ready_event.wait(timeout=30)
@@ -161,7 +167,7 @@ class ChromaStore:
                 qe = qe.tolist()
 
             clauses: list[dict] = []
-            if kb_ids:
+            if kb_ids is not None:
                 clauses.append({"kb_id": {"$in": kb_ids}})
             if where_extra:
                 clauses.append(where_extra)

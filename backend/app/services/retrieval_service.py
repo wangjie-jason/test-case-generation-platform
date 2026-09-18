@@ -65,8 +65,10 @@ async def _search(model, db, keywords, kb_ids, fields):
             conditions.append(f.contains(kw))
     stmt = select(model)
     if conditions: stmt = stmt.where(or_(*conditions))
-    if kb_ids:
-        if hasattr(model, 'kb_id'): stmt = stmt.where(model.kb_id.in_(kb_ids))
+    # kb_ids 是显式过滤集合（含空列表）：空列表 = 用户可见库为零，必须零结果
+    # （fail-closed），不能用真值判断退化成不过滤；只有 None 才表示不按库过滤。
+    if kb_ids is not None and hasattr(model, 'kb_id'):
+        stmt = stmt.where(model.kb_id.in_(kb_ids))
     r = await db.execute(stmt.limit(10))
     return list(r.scalars().all())
 
@@ -85,7 +87,7 @@ async def _search_long_text(model, db, keywords, kb_ids, text_attr, extra_fields
     conditions = [f.contains(kw) for kw in keywords for f in fields]
     stmt = select(model)
     if conditions: stmt = stmt.where(or_(*conditions))
-    if kb_ids and hasattr(model, 'kb_id'):
+    if kb_ids is not None and hasattr(model, 'kb_id'):
         stmt = stmt.where(model.kb_id.in_(kb_ids))
     r = await db.execute(stmt.limit(50))
     candidates = list(r.scalars().all())

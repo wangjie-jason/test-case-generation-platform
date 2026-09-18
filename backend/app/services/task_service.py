@@ -147,7 +147,9 @@ class TaskManager:
                 async with async_session() as db:
                     try:
                         async for event in GeneratorService.generate_stream(
-                            db, task.requirement_text, kb_ids=task.kb_ids or None,
+                            # kb_ids 是路由层收敛后的显式可见集合（可能为 []），
+                            # 不能 `or None`——空列表转 None 会让检索退化为全库检索。
+                            db, task.requirement_text, kb_ids=task.kb_ids,
                             owner_id=task.owner_id,
                         ):
                             if event.get("type") == "complete":

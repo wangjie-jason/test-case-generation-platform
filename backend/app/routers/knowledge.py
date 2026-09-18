@@ -15,6 +15,7 @@ from app.models.defect_record import DefectRecord
 from app.models.test_case import TestCase
 from app.routers.deps import get_current_user
 from app.services import access_service, llm_credential_service
+from app.services.crypto_service import CryptoError
 from app.utils import llm_credentials
 from app.schemas.knowledge import (
     BusinessRuleCreate,
@@ -177,9 +178,15 @@ async def upload_prd(kb_id: str, file: UploadFile = File(...), user: User = Depe
     if ext not in {"pdf", "docx", "md", "txt"}: raise HTTPException(400, f"不支持: {ext}")
     content = await file.read()
     # 图片 OCR 用当前用户凭据（个人优先、否则系统兜底）；都没配则降级，不挡上传。
-    creds = await llm_credential_service.resolve_credentials_optional(db, user.id)
-    with llm_credentials.bind(creds):
-        raw_text = await ParserService.parse(file.filename or "未命名", content)
+    try:
+        creds = await llm_credential_service.resolve_credentials_optional(db, user.id)
+    except CryptoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        with llm_credentials.bind(creds):
+            raw_text = await ParserService.parse(file.filename or "未命名", content)
+    except Exception as exc:  # noqa: BLE001 扩展名合法但内容损坏（坏 docx/pdf），转 400 而非 500
+        raise HTTPException(status_code=400, detail="文件无法解析，请确认文件未损坏且格式正确") from exc
     doc = await _kb.create_prd_document(db, kb_id, file.filename or "未命名", ext, raw_text)
     await IndexingService.index_prd(doc)
     return doc
@@ -251,7 +258,13 @@ async def delete_defect(kb_id: str, record_id: str, user: User = Depends(get_cur
 async def import_defects(kb_id: str, file: UploadFile = File(...), user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     await access_service.get_kb_or_404(db, kb_id, user, require_manage=True)
     content = await file.read()
-    records = ExcelImportService.parse_defect_records(content)
+    try:
+        records = ExcelImportService.parse_defect_records(content)
+    except ValueError as exc:
+        # 缺必要列等业务校验，保留原始提示。
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 不是有效 Excel（openpyxl 抛 InvalidFileError），转 400
+        raise HTTPException(status_code=400, detail="文件无法解析，请确认是有效的 Excel 文件") from exc
     created = [await _kb.create_defect_record(db, kb_id, r) for r in records]
     for rec in created:
         await IndexingService.index_defect(rec)

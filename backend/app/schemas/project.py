@@ -28,7 +28,12 @@ class KnowledgeBaseUpdate(BaseModel):
     @field_validator("name")
     @classmethod
     def _strip_name(cls, v: str | None) -> str | None:
-        return v.strip() if v is not None else v
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("名称不能为空")
+        return v
 
 
 class KnowledgeBaseResponse(BaseModel):

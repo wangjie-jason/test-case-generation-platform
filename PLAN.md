@@ -1,5 +1,7 @@
 # Test Case Generation Platform — 实施计划
 
+> 版本 v2.8 | 更新 2026-09-18 | 多用户化首轮代码评审安全修复（设计见 DESIGN.md v0.33，分支 fix/auth-review-p0-p1，**已改未提交**）：① 零可见知识库检索 fail-open 越权——空 kb_ids 被当成不过滤致全库检索，改为空集合零结果（SQL 空 IN + Chroma 入口短路）、任务入口去掉 `or None`；② 密钥启动 fail-fast——JWT 密钥 ≥32 字符、ADMIN 账号非空/≥6 位、Fernet 密钥启动试构造校验（空串实测可签发 JWT）；③ CryptoError 五处转 400、损坏的 docx/pdf/xlsx 转 400；④ 登出改整页跳转（销毁 Pinia store、中止 SSE，防同标签换号残留）；⑤ 修最后管理员判定误拦普通用户 no-op；⑥ 用户名/知识库名纯空白 422。验证：16 项一次性脚本断言 + vue-tsc 通过。
+>
 > 版本 v2.7 | 更新 2026-09-18 | 多用户化与服务器部署收口：登录/JWT(12h)/用户管理（建号·角色·停用·重置密码，只停用不删除）、个人大模型凭据（Fernet 加密、连通测试、清除）+ 系统兜底模型两级解析（个人 key 失败不自动降级）、ContextVar+任务快照把凭据透传到后台流水线、知识库个人/团队可见性与 can_manage、批次/用例/SSE/few-shot 按 owner 私有、统计「我的/团队」两视图（by_model/by_user，无批次明细）、Alembic 0003 迁移（users 两表+归属列+partial unique index+老数据归 admin）、compose 端口收敛与 healthcheck、网关 TLS/SSE 反代示例、SQLite WAL、env_file 密钥注入与在线备份。对应 PR #70–#73/#76/#77，设计见 DESIGN.md v0.32
 >
 > 版本 v2.6 | 更新 2026-08-18 | 死代码清理（删 `POST /retrieve`、`GET /cases` 无 `batch_id` 分支、前端 4 个无引用文件与未用的 echarts 依赖、`complete` 事件里没人消费的 `validation_warnings`、`excel_service` 三个未接路由的导入函数、孤儿 schema `KnowledgeBaseUpdate`）+ `generate_stream` 拆分（238 行 → 64 行编排器，模块并行改用通用 `_parallel_agents`，事件契约零变化）+ 修生成失败的**原因到不了用户**（`_generate_one_batch` 提前滤掉了 error 占位，使 `generate_stream` 里取原因那段成了死代码；现在「只吐思考」「模型判定无可测功能点」都会把可行动原因透传到前端）+ 回归测试 61 → 108 项（新增 LLM 输出解析 36 + 生成流水线事件序列 11）

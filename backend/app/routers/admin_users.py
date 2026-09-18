@@ -61,9 +61,11 @@ async def update_user(
     if user.id == admin.id and (data.get("is_active") is False or data.get("is_admin") is False):
         raise HTTPException(status_code=400, detail="不能停用或降级自己")
     # 任何时候都要至少保留一个活跃管理员。
+    # 只统计「当前是管理员、且操作后不再是活跃管理员」的情况；第二个分支必须带
+    # user.is_admin，否则对本来就是普通用户的账号传 is_admin=false（no-op）也会被误拦。
     will_lose_admin = (
         (data.get("is_active") is False and user.is_admin)
-        or (data.get("is_admin") is False and user.is_active)
+        or (data.get("is_admin") is False and user.is_admin and user.is_active)
     )
     if will_lose_admin and await _active_admin_count(db) <= 1:
         raise HTTPException(status_code=400, detail="至少保留一个活跃管理员")
